@@ -340,45 +340,53 @@ impl WebviewManager {
                  window_pos.x, window_pos.y, window_size.width, window_size.height);
         eprintln!("Will click at screen coordinates: ({}, {})", click_x, click_y);
 
-        // Create enigo instance for OS-level input
-        let mut enigo = match Enigo::new(&Settings::default()) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("Failed to create Enigo: {:?}", e);
-                return false;
+        // Run enigo operations in spawn_blocking since Enigo is not Send on macOS
+        let enigo_result = tokio::task::spawn_blocking(move || {
+            let mut enigo = match Enigo::new(&Settings::default()) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("Failed to create Enigo: {:?}", e);
+                    return false;
+                }
+            };
+
+            // Step 1: Click on white space (center of page)
+            eprintln!("Step 1: Clicking on white space at ({}, {})...", click_x, click_y);
+            if let Err(e) = enigo.move_mouse(click_x, click_y, Coordinate::Abs) {
+                eprintln!("Failed to move mouse: {:?}", e);
             }
-        };
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Err(e) = enigo.button(Button::Left, enigo::Direction::Click) {
+                eprintln!("Failed to click: {:?}", e);
+            }
+            eprintln!("Step 1 complete: Clicked on page body");
 
-        // Step 1: Click on white space (center of page)
-        eprintln!("Step 1: Clicking on white space at ({}, {})...", click_x, click_y);
-        if let Err(e) = enigo.move_mouse(click_x, click_y, Coordinate::Abs) {
-            eprintln!("Failed to move mouse: {:?}", e);
+            // Wait 1 second
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            // Step 2: Press Tab
+            eprintln!("Step 2: Pressing Tab...");
+            if let Err(e) = enigo.key(Key::Tab, enigo::Direction::Click) {
+                eprintln!("Failed to press Tab: {:?}", e);
+            }
+            eprintln!("Step 2 complete: Pressed Tab");
+
+            // Wait 1 second
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            // Step 3: Press Space
+            eprintln!("Step 3: Pressing Space...");
+            if let Err(e) = enigo.key(Key::Space, enigo::Direction::Click) {
+                eprintln!("Failed to press Space: {:?}", e);
+            }
+            eprintln!("Step 3 complete: Pressed Space");
+
+            true
+        }).await.unwrap_or(false);
+
+        if !enigo_result {
+            return false;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        if let Err(e) = enigo.button(Button::Left, enigo::Direction::Click) {
-            eprintln!("Failed to click: {:?}", e);
-        }
-        eprintln!("Step 1 complete: Clicked on page body");
-
-        // Wait 1 second
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        // Step 2: Press Tab
-        eprintln!("Step 2: Pressing Tab...");
-        if let Err(e) = enigo.key(Key::Tab, enigo::Direction::Click) {
-            eprintln!("Failed to press Tab: {:?}", e);
-        }
-        eprintln!("Step 2 complete: Pressed Tab");
-
-        // Wait 1 second
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        // Step 3: Press Space
-        eprintln!("Step 3: Pressing Space...");
-        if let Err(e) = enigo.key(Key::Space, enigo::Direction::Click) {
-            eprintln!("Failed to press Space: {:?}", e);
-        }
-        eprintln!("Step 3 complete: Pressed Space");
 
         // Wait 5 seconds for captcha to process
         eprintln!("Waiting 5 seconds for captcha to process...");
