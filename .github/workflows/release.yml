@@ -22,14 +22,19 @@ jobs:
     steps:
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Columbus Desktop ${{ github.ref_name }}
+          name: Columbus Desktop ${{ github.ref_name }}
           draft: true
           prerelease: false
+          generate_release_notes: false
+          body: |
+            ## Columbus Desktop App
+
+            Download the appropriate installer for your platform below.
 
   build:
     needs: create-release

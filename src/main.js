@@ -116,12 +116,18 @@ function showUpdateAvailable(update) {
 
         try {
             // Download and install the update
+            let downloaded = 0;
+            let contentLength = 0;
             await update.downloadAndInstall((progress) => {
                 if (progress.event === 'Started' && btn) {
+                    contentLength = progress.data.contentLength || 0;
                     btn.textContent = `Downloading... 0%`;
                 } else if (progress.event === 'Progress' && btn) {
-                    const percent = Math.round((progress.data.chunkLength / progress.data.contentLength) * 100);
-                    btn.textContent = `Downloading... ${percent}%`;
+                    downloaded += progress.data.chunkLength;
+                    if (contentLength > 0) {
+                        const percent = Math.round((downloaded / contentLength) * 100);
+                        btn.textContent = `Downloading... ${percent}%`;
+                    }
                 } else if (progress.event === 'Finished' && btn) {
                     btn.textContent = 'Restarting...';
                 }
