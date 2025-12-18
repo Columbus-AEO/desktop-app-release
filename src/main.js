@@ -1,6 +1,7 @@
 // Columbus Desktop App - Main JavaScript
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getVersion } from '@tauri-apps/api/app';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 
@@ -68,26 +69,44 @@ async function init() {
     await loadInstances();
     await loadPlatforms();
     await setupScanEventListeners();
+    // Display app version
+    await displayAppVersion();
     // checkAuthStatus will call hideLoadingScreen when fully ready
     await checkAuthStatus();
     // Check for updates in the background
     checkForUpdates();
 }
 
+async function displayAppVersion() {
+    try {
+        const version = await getVersion();
+        const versionEl = document.getElementById('appVersion');
+        if (versionEl) {
+            versionEl.textContent = `Desktop v${version}`;
+        }
+    } catch (error) {
+        console.error('Failed to get app version:', error);
+    }
+}
+
 // ==================== Auto-Update ====================
 async function checkForUpdates() {
     try {
-        console.log('Checking for updates...');
+        console.log('[Updater] Checking for updates...');
+        console.warn('[Updater] Checking for updates...'); // Also warn so it's more visible
         const update = await check();
 
         if (update) {
-            console.log(`Update available: ${update.version}`);
+            console.log(`[Updater] Update available: ${update.version}`);
+            console.warn(`[Updater] Update available: ${update.version}`);
             showUpdateAvailable(update);
         } else {
-            console.log('No updates available');
+            console.log('[Updater] No updates available');
+            console.warn('[Updater] No updates available');
         }
     } catch (error) {
-        console.log('Update check failed (this is normal in dev):', error);
+        console.log('[Updater] Update check failed:', error);
+        console.warn('[Updater] Update check failed:', error);
     }
 }
 
