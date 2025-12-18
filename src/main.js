@@ -44,7 +44,7 @@ let dailyUsage = {
 let currentProductPromptCount = 0; // Number of enabled prompts for current product
 
 // Dashboard URL
-const DASHBOARD_URL = 'https://columbus-aeo.vercel.app/dashboard';
+const DASHBOARD_URL = 'https://columbus-aeo.com/dashboard';
 
 // ==================== DOM Elements ====================
 let loginView, mainView, scanningView, completeView, onboardingView, regionAuthView;
@@ -263,7 +263,7 @@ function setupEventListeners() {
     googleLoginBtn?.addEventListener('click', handleGoogleLogin);
     signupLink?.addEventListener('click', (e) => {
         e.preventDefault();
-        invoke('open_url_in_browser', { url: 'https://columbus-aeo.vercel.app/signup' });
+        invoke('open_url_in_browser', { url: 'https://columbus-aeo.com/signup' });
     });
 
     // Main view
@@ -308,6 +308,8 @@ function setupEventListeners() {
             samplesWarning.classList.add('hidden');
         }
         saveProductConfig();
+        // Update scan info to reflect new cost calculation
+        updateScanButtonState();
     });
 
     // Onboarding
@@ -1221,14 +1223,19 @@ async function handleAutostartChange() {
 async function loadScheduleInfo() {
     try {
         const info = await invoke('get_schedule_info', { productId: selectedProductId });
-        if (info.next_scan_time) {
-            const time = new Date(info.next_scan_time);
-            nextScanTime.textContent = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        console.log('[Schedule] Info:', info);
+
+        // API returns next_scan_hour (0-23), not next_scan_time
+        if (info.next_scan_hour !== null && info.next_scan_hour !== undefined) {
+            // Format as HH:00
+            const hour = info.next_scan_hour;
+            const formattedHour = hour.toString().padStart(2, '0');
+            nextScanTime.textContent = `${formattedHour}:00`;
         } else {
             nextScanTime.textContent = '--';
         }
         scansCompleted.textContent = info.scans_completed_today || 0;
-        scansTotal.textContent = info.scans_per_day || 1;
+        scansTotal.textContent = info.scans_total_today || 1;
     } catch (error) {
         console.error('Failed to load schedule info:', error);
     }
@@ -1250,18 +1257,35 @@ function updateScanButtonState() {
     } else {
         const product = products.find(p => p.id === selectedProductId);
 
+        // Calculate total prompts used accounting for samples per prompt
+        const samples = parseInt(samplesPerPrompt?.value) || 1;
+        const totalPromptsToUse = currentProductPromptCount * samples;
+
         // Show scan cost preview
         if (dailyUsage.isUnlimited) {
-            scanInfo.textContent = `Ready to scan ${product?.name || 'product'} (${currentProductPromptCount} prompts)`;
+            if (samples > 1) {
+                scanInfo.textContent = `Ready to scan ${product?.name || 'product'} (${currentProductPromptCount} prompts × ${samples} samples = ${totalPromptsToUse} tests)`;
+            } else {
+                scanInfo.textContent = `Ready to scan ${product?.name || 'product'} (${currentProductPromptCount} prompts)`;
+            }
         } else if (currentProductPromptCount > 0) {
-            const willUse = Math.min(currentProductPromptCount, dailyUsage.remaining);
+            const willUse = Math.min(totalPromptsToUse, dailyUsage.remaining);
             if (dailyUsage.remaining === 0) {
                 scanInfo.innerHTML = `<span class="text-amber-600">Daily limit reached (${dailyUsage.current}/${dailyUsage.limit})</span>`;
                 scanBtn.disabled = true;
-            } else if (currentProductPromptCount > dailyUsage.remaining) {
-                scanInfo.innerHTML = `Will test ${willUse} of ${currentProductPromptCount} prompts <span class="text-amber-600">(${dailyUsage.remaining} remaining today)</span>`;
+            } else if (totalPromptsToUse > dailyUsage.remaining) {
+                const promptsCanTest = Math.floor(dailyUsage.remaining / samples);
+                if (samples > 1) {
+                    scanInfo.innerHTML = `Will test ${promptsCanTest} of ${currentProductPromptCount} prompts (${samples}× samples) <span class="text-amber-600">(${dailyUsage.remaining} remaining today)</span>`;
+                } else {
+                    scanInfo.innerHTML = `Will test ${willUse} of ${currentProductPromptCount} prompts <span class="text-amber-600">(${dailyUsage.remaining} remaining today)</span>`;
+                }
             } else {
-                scanInfo.textContent = `This scan will use ${currentProductPromptCount} of your ${dailyUsage.remaining} remaining daily tests`;
+                if (samples > 1) {
+                    scanInfo.textContent = `This scan will use ${totalPromptsToUse} tests (${currentProductPromptCount} prompts × ${samples} samples) - ${dailyUsage.remaining} remaining today`;
+                } else {
+                    scanInfo.textContent = `This scan will use ${currentProductPromptCount} of your ${dailyUsage.remaining} remaining daily tests`;
+                }
             }
         } else {
             scanInfo.textContent = `Ready to scan ${product?.name || 'product'}`;

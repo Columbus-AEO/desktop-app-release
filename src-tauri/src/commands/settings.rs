@@ -22,6 +22,8 @@ pub async fn get_product_config(product_id: String) -> Result<ProductConfig, Str
 }
 
 /// Calculate scheduled scan times based on config
+/// Note: This is for UI preview. The actual runtime schedule in autoscan.rs may
+/// apply additional offsets to distribute scans across multiple products.
 fn calculate_scheduled_times(scans_per_day: u32, time_window_start: u32, time_window_end: u32) -> Vec<u32> {
     let start = time_window_start;
     let end = time_window_end;
@@ -40,12 +42,19 @@ fn calculate_scheduled_times(scans_per_day: u32, time_window_start: u32, time_wi
     }
 
     // Multiple scans: distribute evenly across the window
+    // Divide window into N intervals and place scan at the center of each
     let mut times = Vec::with_capacity(scans as usize);
-    let interval = window_hours as f64 / (scans - 1) as f64;
+    let interval = window_hours as f64 / scans as f64;
 
     for i in 0..scans {
-        let time = start as f64 + (i as f64 * interval);
-        times.push(time.round() as u32);
+        // Start from interval/2 to center scans in the window
+        let time = start as f64 + (interval / 2.0) + (i as f64 * interval);
+        let clamped = time.round() as u32;
+        if clamped >= start && clamped < end {
+            times.push(clamped);
+        } else if clamped >= end {
+            times.push(end - 1);
+        }
     }
 
     times

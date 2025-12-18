@@ -1,8 +1,53 @@
-use crate::{storage, storage::ProductConfig, AppState};
+use crate::{storage, storage::ProductConfig, AppState, SUPABASE_URL, SUPABASE_ANON_KEY};
 use chrono::Timelike;
+use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, async_runtime};
 use tokio::time::{Duration, interval};
+
+#[derive(Deserialize)]
+struct StatusProduct {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct StatusResponse {
+    products: Vec<StatusProduct>,
+}
+
+/// Fetch the list of product IDs the current user has access to
+async fn get_user_product_ids(state: &Arc<AppState>) -> Result<HashSet<String>, String> {
+    let token = {
+        let auth = state.auth.lock();
+        auth.access_token.clone().ok_or("Not authenticated")?
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/functions/v1/extension-status", SUPABASE_URL);
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("apikey", SUPABASE_ANON_KEY)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status, error_text));
+    }
+
+    let status: StatusResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    Ok(status.products.into_iter().map(|p| p.id).collect())
+}
 
 /// Start the auto-scan background scheduler
 pub fn start_scheduler(app: AppHandle) {
@@ -23,7 +68,9 @@ pub fn start_scheduler(app: AppHandle) {
 }
 
 /// Calculate scheduled scan times for a product based on its config
-fn calculate_scheduled_times(config: &ProductConfig) -> Vec<u32> {
+/// The `product_index` and `total_products` parameters allow distributing scans across
+/// multiple products to avoid all scans happening at the same time.
+fn calculate_scheduled_times(config: &ProductConfig, product_index: usize, total_products: usize) -> Vec<u32> {
     let start = config.time_window_start;
     let end = config.time_window_end;
     let scans = config.scans_per_day;
@@ -36,19 +83,43 @@ fn calculate_scheduled_times(config: &ProductConfig) -> Vec<u32> {
 
     let window_hours = end - start;
 
+    // Calculate total scans across all products to distribute evenly
+    let total_scans = scans as usize * total_products.max(1);
+    let product_offset = product_index as f64 / total_products.max(1) as f64;
+
     if scans == 1 {
-        // Single scan: run at the middle of the window
-        return vec![start + window_hours / 2];
+        // Single scan: distribute across products by offset
+        // Instead of all products at middle, spread them out
+        if total_products > 1 {
+            let offset_hours = (window_hours as f64 * product_offset).round() as u32;
+            return vec![start + offset_hours];
+        } else {
+            return vec![start + window_hours / 2];
+        }
     }
 
     // Multiple scans: distribute evenly across the window
-    // For N scans, we divide the window into N-1 intervals
+    // For N scans, we divide the window into N intervals (not N-1, to leave room at edges)
     let mut times = Vec::with_capacity(scans as usize);
-    let interval = window_hours as f64 / (scans - 1) as f64;
+    let interval = window_hours as f64 / scans as f64;
+
+    // Add a small offset based on product index to avoid all products scanning at once
+    let product_offset_hours = if total_products > 1 {
+        (interval / total_products as f64) * product_index as f64
+    } else {
+        0.0
+    };
 
     for i in 0..scans {
-        let time = start as f64 + (i as f64 * interval);
-        times.push(time.round() as u32);
+        // Start from interval/2 to center scans in the window
+        let time = start as f64 + (interval / 2.0) + (i as f64 * interval) + product_offset_hours;
+        // Clamp to window bounds
+        let clamped = time.round() as u32;
+        if clamped >= start && clamped < end {
+            times.push(clamped);
+        } else if clamped >= end {
+            times.push(end - 1); // Don't exceed end
+        }
     }
 
     times
@@ -75,12 +146,29 @@ async fn check_and_run_auto_scans(app: &AppHandle) {
         }
     }
 
+    // Fetch the list of product IDs the current user has access to
+    let user_product_ids = match get_user_product_ids(&state).await {
+        Ok(ids) => {
+            println!("[AutoScan] User has access to {} products", ids.len());
+            ids
+        }
+        Err(e) => {
+            eprintln!("[AutoScan] Failed to fetch user products: {}", e);
+            return;
+        }
+    };
+
+    if user_product_ids.is_empty() {
+        println!("[AutoScan] User has no products, skipping auto-scan check");
+        return;
+    }
+
     // Get current date and hour
     let now = chrono::Local::now();
     let today = now.format("%Y-%m-%d").to_string();
     let current_hour = now.hour();
 
-    // Get all product configs
+    // Get all product configs (local storage)
     let product_configs = storage::get_all_product_configs();
 
     if product_configs.is_empty() {
@@ -88,11 +176,21 @@ async fn check_and_run_auto_scans(app: &AppHandle) {
         return;
     }
 
-    println!("[AutoScan] Checking {} products for auto-scans (current hour: {})",
-        product_configs.len(), current_hour);
+    // Filter to only products the current user has access to and sort by ID for consistent ordering
+    let mut user_product_configs: Vec<_> = product_configs
+        .into_iter()
+        .filter(|(id, _)| user_product_ids.contains(id))
+        .collect();
 
-    // Iterate over all products
-    for (product_id, mut config) in product_configs {
+    // Sort by product ID to ensure consistent ordering across runs
+    user_product_configs.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let total_products = user_product_configs.len();
+    println!("[AutoScan] Checking {} products for auto-scans (current hour: {})",
+        total_products, current_hour);
+
+    // Iterate over user's products only
+    for (product_index, (product_id, mut config)) in user_product_configs.into_iter().enumerate() {
         // Skip if auto-run is disabled for this product
         if !config.auto_run_enabled {
             println!("[AutoScan] Product {} has auto-run disabled, skipping", product_id);
@@ -107,18 +205,33 @@ async fn check_and_run_auto_scans(app: &AppHandle) {
 
         // Check if it's a new day - reset counter and recalculate schedule
         let is_new_day = config.last_auto_scan_date.as_ref() != Some(&today);
+
+        // Calculate expected schedule for this product (to check if redistribution is needed)
+        let expected_schedule = calculate_scheduled_times(&config, product_index, total_products);
+
+        // Check if schedule needs redistribution (product count changed, or schedule is stale)
+        let needs_redistribution = !is_new_day
+            && !config.scheduled_times.is_empty()
+            && config.scheduled_times != expected_schedule
+            && config.scans_today == 0; // Only redistribute if no scans have run yet today
+
         if is_new_day {
             println!("[AutoScan] New day for product {}, resetting scan counter and schedule", product_id);
             config.last_auto_scan_date = Some(today.clone());
             config.scans_today = 0;
-            config.scheduled_times = calculate_scheduled_times(&config);
+            config.scheduled_times = expected_schedule;
             let _ = storage::update_product_config(&product_id, &config);
-            println!("[AutoScan] Scheduled times for product {}: {:?}", product_id, config.scheduled_times);
+            println!("[AutoScan] Scheduled times for product {} (index {}): {:?}", product_id, product_index, config.scheduled_times);
+        } else if needs_redistribution {
+            println!("[AutoScan] Redistributing schedule for product {} (index {}/{})", product_id, product_index, total_products);
+            config.scheduled_times = expected_schedule;
+            let _ = storage::update_product_config(&product_id, &config);
+            println!("[AutoScan] New scheduled times for product {}: {:?}", product_id, config.scheduled_times);
         }
 
         // Recalculate schedule if empty (config might have changed)
         if config.scheduled_times.is_empty() {
-            config.scheduled_times = calculate_scheduled_times(&config);
+            config.scheduled_times = calculate_scheduled_times(&config, product_index, total_products);
             let _ = storage::update_product_config(&product_id, &config);
             println!("[AutoScan] Recalculated schedule for product {}: {:?}", product_id, config.scheduled_times);
         }
