@@ -5,12 +5,34 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g., v1.0.0)'
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Columbus Desktop ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -60,26 +82,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'Columbus Desktop v__VERSION__'
-          releaseBody: |
-            ## Columbus Desktop App
-
-            Download the appropriate installer for your platform:
-            - **Windows**: `.msi` installer
-            - **macOS (Apple Silicon)**: `_aarch64.dmg`
-            - **macOS (Intel)**: `_x64.dmg`
-            - **Linux**: `.deb` or `.AppImage`
-
-            ### Auto-Updates
-            The app will automatically check for updates and notify you when a new version is available.
-
-            ### Installation
-            1. Download the installer for your operating system
-            2. Run the installer
-            3. Launch Columbus from your applications
-            4. Sign in with your Columbus account
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
           includeUpdaterJson: true
