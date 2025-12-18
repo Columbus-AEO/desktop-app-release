@@ -369,14 +369,8 @@ async fn run_scan(
             .to_string();
 
         let handle = tokio::spawn(async move {
-            // Helper to check cancellation
-            let is_cancelled = || {
-                let scan = state_clone.scan.lock();
-                !scan.is_running
-            };
-
             // Check if scan was cancelled before starting
-            if is_cancelled() {
+            if !state_clone.scan.lock().is_running {
                 return Err("Scan cancelled".to_string());
             }
 
@@ -388,7 +382,7 @@ async fn run_scan(
                 let mut mgr = manager_clone.lock().await;
 
                 // Check cancellation RIGHT BEFORE creating webview (after acquiring lock)
-                if is_cancelled() {
+                if !state_clone.scan.lock().is_running {
                     eprintln!("[Scan] Cancelled before creating webview {}", task.label);
                     return Err("Scan cancelled".to_string());
                 }
@@ -413,7 +407,7 @@ async fn run_scan(
             }
 
             // Check cancellation after webview creation
-            if is_cancelled() {
+            if !state_clone.scan.lock().is_running {
                 eprintln!("[Scan] Cancelled after creating webview {}", task.label);
                 return Err("Scan cancelled".to_string());
             }
@@ -421,14 +415,14 @@ async fn run_scan(
             // Wait for page load with cancellation checks every 500ms
             for _ in 0..6 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if is_cancelled() {
+                if !state_clone.scan.lock().is_running {
                     eprintln!("[Scan] Cancelled during page load for {}", task.label);
                     return Err("Scan cancelled".to_string());
                 }
             }
 
             // Check cancellation before submitting prompt
-            if is_cancelled() {
+            if !state_clone.scan.lock().is_running {
                 return Err("Scan cancelled".to_string());
             }
 
@@ -443,11 +437,11 @@ async fn run_scan(
                 // Wait with cancellation checks
                 for _ in 0..8 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                    if is_cancelled() {
+                    if !state_clone.scan.lock().is_running {
                         return Err("Scan cancelled".to_string());
                     }
                 }
-                if !is_cancelled() {
+                if state_clone.scan.lock().is_running {
                     let mgr = manager_clone.lock().await;
                     let _ = mgr.submit_prompt(&app_clone, &task.label, &task.platform, &task.prompt.text).await;
                 }
