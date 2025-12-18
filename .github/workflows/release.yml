@@ -76,6 +76,7 @@ jobs:
         run: npm ci
 
       - name: Debug secrets
+        shell: bash
         run: |
           echo "TAURI_SIGNING_PRIVATE_KEY is set: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}"
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is set: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}"
