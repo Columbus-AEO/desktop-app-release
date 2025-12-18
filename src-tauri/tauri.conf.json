@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Columbus",
+  "version": "1.0.0",
+  "identifier": "com.columbus.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../src/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Columbus - AI Brand Monitor",
+        "width": 450,
+        "height": 700,
+        "resizable": false,
+        "fullscreen": false,
+        "center": true,
+        "decorations": true,
+        "transparent": false,
+        "visible": true,
+        "closable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "publisher": "Columbus AEO",
+    "category": "Productivity",
+    "shortDescription": "AI Visibility Monitoring for Brands"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Columbus-AEO/desktop-app-release/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU3MzUwOUQ5MERCMDc4MUIKUldRYmVMQU4yUWsxVnpudVhadmNmd3o5eXBkMzBiSCs1WXNPRThac0hTakJmeGVvQkRTc2lnWTgK"
+    }
+  }
+}

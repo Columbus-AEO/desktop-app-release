@@ -1,0 +1,49 @@
+[package]
+name = "columbus-desktop"
+version = "1.0.0"
+description = "Columbus AI Brand Monitor Desktop App"
+authors = ["Columbus"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools", "tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-autostart = "2.0"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+thiserror = "1"
+parking_lot = "0.12"
+lazy_static = "1.4"
+open = "5"
+url = "2"
+urlencoding = "2"
+enigo = "0.2"
+dirs = "5"
+image = "0.24"
+base64 = "0.22"
+keyring = { version = "3", features = ["windows-native"] }
+futures = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
