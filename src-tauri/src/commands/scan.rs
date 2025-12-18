@@ -368,9 +368,14 @@ async fn run_scan(
             .ok_or_else(|| format!("Unknown platform: {}", task.platform))?
             .to_string();
 
+        // Helper to check if scan is cancelled (must not hold lock across await)
+        fn is_scan_running(state: &Arc<AppState>) -> bool {
+            state.scan.lock().is_running
+        }
+
         let handle = tokio::spawn(async move {
             // Check if scan was cancelled before starting
-            if !state_clone.scan.lock().is_running {
+            if !is_scan_running(&state_clone) {
                 return Err("Scan cancelled".to_string());
             }
 
@@ -382,7 +387,7 @@ async fn run_scan(
                 let mut mgr = manager_clone.lock().await;
 
                 // Check cancellation RIGHT BEFORE creating webview (after acquiring lock)
-                if !state_clone.scan.lock().is_running {
+                if !is_scan_running(&state_clone) {
                     eprintln!("[Scan] Cancelled before creating webview {}", task.label);
                     return Err("Scan cancelled".to_string());
                 }
@@ -407,7 +412,7 @@ async fn run_scan(
             }
 
             // Check cancellation after webview creation
-            if !state_clone.scan.lock().is_running {
+            if !is_scan_running(&state_clone) {
                 eprintln!("[Scan] Cancelled after creating webview {}", task.label);
                 return Err("Scan cancelled".to_string());
             }
@@ -415,14 +420,14 @@ async fn run_scan(
             // Wait for page load with cancellation checks every 500ms
             for _ in 0..6 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if !state_clone.scan.lock().is_running {
+                if !is_scan_running(&state_clone) {
                     eprintln!("[Scan] Cancelled during page load for {}", task.label);
                     return Err("Scan cancelled".to_string());
                 }
             }
 
             // Check cancellation before submitting prompt
-            if !state_clone.scan.lock().is_running {
+            if !is_scan_running(&state_clone) {
                 return Err("Scan cancelled".to_string());
             }
 
@@ -437,11 +442,11 @@ async fn run_scan(
                 // Wait with cancellation checks
                 for _ in 0..8 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                    if !state_clone.scan.lock().is_running {
+                    if !is_scan_running(&state_clone) {
                         return Err("Scan cancelled".to_string());
                     }
                 }
-                if state_clone.scan.lock().is_running {
+                if is_scan_running(&state_clone) {
                     let mgr = manager_clone.lock().await;
                     let _ = mgr.submit_prompt(&app_clone, &task.label, &task.platform, &task.prompt.text).await;
                 }
