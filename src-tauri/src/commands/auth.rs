@@ -337,18 +337,20 @@ fn get_success_page_html() -> &'static str {
 </html>"#
 }
 
+// Fixed port for OAuth callback - must be added to Supabase's allowed redirect URLs
+const OAUTH_CALLBACK_PORT: u16 = 19820;
+
 #[tauri::command]
 pub async fn login_with_google(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<User, String> {
-    // Start a local server to receive the OAuth callback
-    let listener = TcpListener::bind("127.0.0.1:0").await
-        .map_err(|e| format!("Failed to start callback server: {}", e))?;
+    // Start a local server on a fixed port to receive the OAuth callback
+    // Using a fixed port allows us to add it to Supabase's allowed redirect URLs
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT)).await
+        .map_err(|e| format!("Failed to start callback server on port {}: {}. Is another instance running?", OAUTH_CALLBACK_PORT, e))?;
 
-    let port = listener.local_addr()
-        .map_err(|e| format!("Failed to get port: {}", e))?
-        .port();
+    let port = OAUTH_CALLBACK_PORT;
 
     let redirect_uri = format!("http://localhost:{}/callback", port);
 
