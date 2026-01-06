@@ -239,6 +239,52 @@ struct ScanTaskResult {
     error: Option<String>,
 }
 
+/// Build batches that respect platform-specific concurrent limits
+/// Claude has a limit of 3 concurrent windows, other platforms use the general max
+fn build_smart_batches(
+    tasks: &[WebviewTask],
+    max_concurrent: usize,
+    claude_max: usize,
+) -> Vec<Vec<WebviewTask>> {
+    let mut batches: Vec<Vec<WebviewTask>> = Vec::new();
+    let mut remaining: Vec<WebviewTask> = tasks.to_vec();
+
+    while !remaining.is_empty() {
+        let mut batch: Vec<WebviewTask> = Vec::new();
+        let mut claude_count = 0;
+        let mut indices_to_remove: Vec<usize> = Vec::new();
+
+        for (i, task) in remaining.iter().enumerate() {
+            // Check if batch is full
+            if batch.len() >= max_concurrent {
+                break;
+            }
+
+            // Check Claude-specific limit
+            if task.platform == "claude" {
+                if claude_count >= claude_max {
+                    continue; // Skip this Claude task, try to add other platforms
+                }
+                claude_count += 1;
+            }
+
+            batch.push(task.clone());
+            indices_to_remove.push(i);
+        }
+
+        // Remove added tasks from remaining (in reverse order to preserve indices)
+        for i in indices_to_remove.into_iter().rev() {
+            remaining.remove(i);
+        }
+
+        if !batch.is_empty() {
+            batches.push(batch);
+        }
+    }
+
+    batches
+}
+
 async fn run_scan(
     app: AppHandle,
     state: Arc<AppState>,
@@ -365,10 +411,16 @@ async fn run_scan(
 
     // Get max concurrent webviews based on system RAM
     let max_concurrent = state.max_concurrent_webviews;
-    let total_tasks = webview_tasks.len();
-    let num_batches = (total_tasks + max_concurrent - 1) / max_concurrent;
 
-    eprintln!("[Scan] RAM limit: {} concurrent webviews, processing in {} batches", max_concurrent, num_batches);
+    // Platform-specific concurrent limits (Claude blocks more than 3 open windows)
+    const CLAUDE_MAX_CONCURRENT: usize = 3;
+
+    // Build smart batches that respect platform-specific limits
+    let batches = build_smart_batches(&webview_tasks, max_concurrent, CLAUDE_MAX_CONCURRENT);
+    let num_batches = batches.len();
+    let total_tasks = webview_tasks.len();
+
+    eprintln!("[Scan] RAM limit: {} concurrent webviews, Claude limit: {}, processing in {} batches", max_concurrent, CLAUDE_MAX_CONCURRENT, num_batches);
 
     // Track aggregated results across all batches
     let mut total_collected = 0;
@@ -381,7 +433,7 @@ async fn run_scan(
     let client = reqwest::Client::new();
 
     // Process webviews in batches - each batch completes its full lifecycle before next
-    for batch in webview_tasks.chunks(max_concurrent) {
+    for batch in &batches {
         batch_number += 1;
 
         // Check cancellation before starting batch
