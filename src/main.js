@@ -1269,35 +1269,27 @@ function updateScanButtonState() {
     } else {
         const product = products.find(p => p.id === selectedProductId);
 
-        // Calculate total prompts used accounting for samples per prompt
+        // Count authenticated platforms across all configured regions
+        const authPlatformCount = platforms.filter(p =>
+            configuredRegions.some(r => isPlatformAuthForRegion(r, p))
+        ).length;
+
+        // Calculate max tests: prompts × samples × platforms
+        // Each prompt is tested on each authenticated platform
         const samples = parseInt(samplesPerPrompt?.value) || 1;
-        const totalPromptsToUse = currentProductPromptCount * samples;
+        const maxTestsToUse = currentProductPromptCount * samples * authPlatformCount;
 
         // Show scan cost preview
         if (dailyUsage.isUnlimited) {
-            if (samples > 1) {
-                scanInfo.textContent = `Ready to scan ${product?.name || 'product'} (${currentProductPromptCount} prompts × ${samples} samples = ${totalPromptsToUse} tests)`;
-            } else {
-                scanInfo.textContent = `Ready to scan ${product?.name || 'product'} (${currentProductPromptCount} prompts)`;
-            }
+            scanInfo.textContent = `Ready to scan ${product?.name || 'product'} (up to ${maxTestsToUse} tests: ${currentProductPromptCount} prompts × ${authPlatformCount} platforms${samples > 1 ? ` × ${samples} samples` : ''})`;
         } else if (currentProductPromptCount > 0) {
-            const willUse = Math.min(totalPromptsToUse, dailyUsage.remaining);
             if (dailyUsage.remaining === 0) {
                 scanInfo.innerHTML = `<span class="text-amber-600">Daily limit reached (${dailyUsage.current}/${dailyUsage.limit})</span>`;
                 scanBtn.disabled = true;
-            } else if (totalPromptsToUse > dailyUsage.remaining) {
-                const promptsCanTest = Math.floor(dailyUsage.remaining / samples);
-                if (samples > 1) {
-                    scanInfo.innerHTML = `Will test ${promptsCanTest} of ${currentProductPromptCount} prompts (${samples}× samples) <span class="text-amber-600">(${dailyUsage.remaining} remaining today)</span>`;
-                } else {
-                    scanInfo.innerHTML = `Will test ${willUse} of ${currentProductPromptCount} prompts <span class="text-amber-600">(${dailyUsage.remaining} remaining today)</span>`;
-                }
+            } else if (maxTestsToUse > dailyUsage.remaining) {
+                scanInfo.innerHTML = `This scan will use up to ${maxTestsToUse} tests (${currentProductPromptCount} prompts × ${authPlatformCount} platforms) <span class="text-amber-600">(${dailyUsage.remaining}/${dailyUsage.limit} remaining)</span>`;
             } else {
-                if (samples > 1) {
-                    scanInfo.textContent = `This scan will use ${totalPromptsToUse} tests (${currentProductPromptCount} prompts × ${samples} samples) - ${dailyUsage.remaining} remaining today`;
-                } else {
-                    scanInfo.textContent = `This scan will use ${currentProductPromptCount} of your ${dailyUsage.remaining} remaining daily tests`;
-                }
+                scanInfo.textContent = `This scan will use up to ${maxTestsToUse} of your ${dailyUsage.remaining} remaining tests (${currentProductPromptCount} prompts × ${authPlatformCount} platforms)`;
             }
         } else {
             scanInfo.textContent = `Ready to scan ${product?.name || 'product'}`;
