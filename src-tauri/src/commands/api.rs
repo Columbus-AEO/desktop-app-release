@@ -75,6 +75,10 @@ pub struct DailyUsageResponse {
     pub current: i32,
     pub limit: i32,
     pub remaining: i32,
+    #[serde(rename = "effectiveRemaining", default)]
+    pub effective_remaining: Option<i32>,
+    #[serde(rename = "pendingEvaluations", default)]
+    pub pending_evaluations: Option<i32>,
     #[serde(rename = "resetAt")]
     pub reset_at: Option<String>,
     pub plan: String,

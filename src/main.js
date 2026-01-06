@@ -36,8 +36,10 @@ const LOCAL_REGION = { code: 'local', name: 'Local (Your Location)', flag_emoji:
 // Daily usage state
 let dailyUsage = {
     current: 0,
-    limit: 5,
-    remaining: 5,
+    limit: 30,
+    remaining: 30,
+    effectiveRemaining: 30, // remaining minus pending evaluations
+    pendingEvaluations: 0,  // results waiting for AI evaluation
     isUnlimited: false,
     plan: 'free'
 };
@@ -759,6 +761,8 @@ async function loadDailyUsage() {
             current: usage.current || 0,
             limit: usage.limit || 5,
             remaining: usage.remaining || 0,
+            effectiveRemaining: usage.effectiveRemaining ?? usage.effective_remaining ?? usage.remaining ?? 30,
+            pendingEvaluations: usage.pendingEvaluations ?? usage.pending_evaluations ?? 0,
             isUnlimited: usage.isUnlimited || usage.is_unlimited || usage.limit === -1,
             plan: usage.plan || 'free'
         };
@@ -1126,6 +1130,28 @@ async function handleProductChange() {
     updateKeywordButtonState();
 }
 
+// Refresh daily usage from check-daily-usage endpoint
+async function refreshDailyUsage() {
+    try {
+        const usageData = await invoke('check_daily_usage');
+        if (usageData) {
+            dailyUsage = {
+                current: usageData.current || 0,
+                limit: usageData.limit || 30,
+                remaining: usageData.remaining ?? 30,
+                effectiveRemaining: usageData.effectiveRemaining ?? usageData.remaining ?? 30,
+                pendingEvaluations: usageData.pendingEvaluations || 0,
+                isUnlimited: usageData.isUnlimited || usageData.limit === -1,
+                plan: usageData.plan || 'free'
+            };
+            console.log('Refreshed daily usage:', dailyUsage);
+            updateScanButtonState();
+        }
+    } catch (error) {
+        console.error('Failed to refresh daily usage:', error);
+    }
+}
+
 async function loadProductPromptCount(productId) {
     try {
         // Get prompt data from extension-prompts endpoint via Rust command
@@ -1134,11 +1160,17 @@ async function loadProductPromptCount(productId) {
         console.log('Product prompt count:', currentProductPromptCount);
 
         // Also update daily usage from the quota if available
+        // Note: extension-prompts may not include effectiveRemaining/pendingEvaluations
+        // so we need to call check_daily_usage for the full picture
         if (promptData?.quota) {
+            const baseRemaining = promptData.quota.promptsRemaining ?? (promptData.quota.promptsPerDay - promptData.quota.promptsUsedToday);
             dailyUsage = {
                 current: promptData.quota.promptsUsedToday || 0,
-                limit: promptData.quota.promptsPerDay || 5,
-                remaining: promptData.quota.promptsRemaining ?? (promptData.quota.promptsPerDay - promptData.quota.promptsUsedToday),
+                limit: promptData.quota.promptsPerDay || 30,
+                remaining: baseRemaining,
+                // Use pending-aware values if available, otherwise fall back to remaining
+                effectiveRemaining: promptData.quota.effectiveRemaining ?? baseRemaining,
+                pendingEvaluations: promptData.quota.pendingEvaluations ?? 0,
                 isUnlimited: promptData.quota.isUnlimited || promptData.quota.promptsPerDay === -1,
                 plan: promptData.quota.plan || 'free'
             };
@@ -1279,17 +1311,30 @@ function updateScanButtonState() {
         const samples = parseInt(samplesPerPrompt?.value) || 1;
         const maxTestsToUse = currentProductPromptCount * samples * authPlatformCount;
 
+        // Use effectiveRemaining (accounts for pending evaluations)
+        const availableTests = dailyUsage.effectiveRemaining ?? dailyUsage.remaining;
+
         // Show scan cost preview
         if (dailyUsage.isUnlimited) {
             scanInfo.textContent = `Ready to scan ${product?.name || 'product'} (up to ${maxTestsToUse} tests: ${currentProductPromptCount} prompts × ${authPlatformCount} platforms${samples > 1 ? ` × ${samples} samples` : ''})`;
         } else if (currentProductPromptCount > 0) {
-            if (dailyUsage.remaining === 0) {
-                scanInfo.innerHTML = `<span class="text-amber-600">Daily limit reached (${dailyUsage.current}/${dailyUsage.limit})</span>`;
+            // Check if there are pending evaluations
+            const pendingWarning = dailyUsage.pendingEvaluations > 0
+                ? ` <span class="text-amber-500">(${dailyUsage.pendingEvaluations} pending)</span>`
+                : '';
+
+            if (availableTests <= 0) {
+                if (dailyUsage.pendingEvaluations > 0) {
+                    scanInfo.innerHTML = `<span class="text-amber-600">Please wait - ${dailyUsage.pendingEvaluations} tests pending evaluation</span>`;
+                } else {
+                    scanInfo.innerHTML = `<span class="text-amber-600">Daily limit reached (${dailyUsage.current}/${dailyUsage.limit})</span>`;
+                }
                 scanBtn.disabled = true;
-            } else if (maxTestsToUse > dailyUsage.remaining) {
-                scanInfo.innerHTML = `This scan will use up to ${maxTestsToUse} tests (${currentProductPromptCount} prompts × ${authPlatformCount} platforms) <span class="text-amber-600">(${dailyUsage.remaining}/${dailyUsage.limit} remaining)</span>`;
+            } else if (maxTestsToUse > availableTests) {
+                // Will only run partial tests
+                scanInfo.innerHTML = `Will run ${availableTests} of ${maxTestsToUse} tests${pendingWarning} <span class="text-gray-500">(${dailyUsage.current}/${dailyUsage.limit} used)</span>`;
             } else {
-                scanInfo.textContent = `This scan will use up to ${maxTestsToUse} of your ${dailyUsage.remaining} remaining tests (${currentProductPromptCount} prompts × ${authPlatformCount} platforms)`;
+                scanInfo.innerHTML = `Up to ${maxTestsToUse} tests (${currentProductPromptCount} prompts × ${authPlatformCount} platforms)${pendingWarning} <span class="text-gray-500">(${availableTests} available)</span>`;
             }
         } else {
             scanInfo.textContent = `Ready to scan ${product?.name || 'product'}`;
@@ -1304,12 +1349,20 @@ async function handleStartScan() {
         return;
     }
 
-    // Refresh usage data and check quota before starting scan
+    // Refresh usage data FIRST to get latest quota including pending evaluations
+    await refreshDailyUsage();
     await loadProductPromptCount(selectedProductId);
 
+    // Use effectiveRemaining (accounts for pending evaluations)
+    const availableTests = dailyUsage.effectiveRemaining ?? dailyUsage.remaining;
+
     // Check if daily limit is reached (unless unlimited)
-    if (!dailyUsage.isUnlimited && dailyUsage.remaining <= 0) {
-        scanInfo.innerHTML = `<span class="text-amber-600">Daily limit reached (${dailyUsage.current}/${dailyUsage.limit}). Resets at midnight.</span>`;
+    if (!dailyUsage.isUnlimited && availableTests <= 0) {
+        if (dailyUsage.pendingEvaluations > 0) {
+            scanInfo.innerHTML = `<span class="text-amber-600">Please wait - ${dailyUsage.pendingEvaluations} tests are pending evaluation</span>`;
+        } else {
+            scanInfo.innerHTML = `<span class="text-amber-600">Daily limit reached (${dailyUsage.current}/${dailyUsage.limit}). Resets at midnight.</span>`;
+        }
         scanBtn.disabled = true;
         return;
     }
@@ -1350,7 +1403,7 @@ async function handleStartScan() {
         }
 
         // Get authenticated platforms for the scan
-        const authPlatforms = platforms.filter(p =>
+        let authPlatforms = platforms.filter(p =>
             configuredRegions.some(r => isPlatformAuthForRegion(r, p))
         );
 
@@ -1359,7 +1412,33 @@ async function handleStartScan() {
             return;
         }
 
-        // Start the scan
+        const samples = parseInt(samplesPerPrompt.value) || 1;
+        const maxTestsToUse = currentProductPromptCount * samples * authPlatforms.length;
+
+        // Calculate how many tests we can actually run
+        let testsToRun = maxTestsToUse;
+        let limitedPlatforms = authPlatforms;
+
+        if (!dailyUsage.isUnlimited && maxTestsToUse > availableTests) {
+            testsToRun = availableTests;
+
+            // Distribute available tests evenly across platforms
+            // Each prompt should be tested on as many platforms as possible
+            const testsPerPrompt = currentProductPromptCount * samples;
+            const platformsWeCanAfford = Math.floor(availableTests / testsPerPrompt);
+
+            if (platformsWeCanAfford > 0 && platformsWeCanAfford < authPlatforms.length) {
+                // Limit to subset of platforms, distributed evenly
+                limitedPlatforms = authPlatforms.slice(0, platformsWeCanAfford);
+                console.log(`Limiting scan to ${platformsWeCanAfford} platforms due to quota (${availableTests} available)`);
+            } else if (platformsWeCanAfford === 0) {
+                // Can't even run all prompts on one platform, limit prompts
+                // The Rust backend will handle limiting prompts
+                console.log(`Very limited quota (${availableTests}), backend will limit prompts`);
+            }
+        }
+
+        // Start the scan with quota limit
         scanBtn.disabled = true;
         isScanning = true;
         resetProgressUI();
@@ -1367,11 +1446,12 @@ async function handleStartScan() {
 
         await invoke('start_scan', {
             productId: selectedProductId,
-            samplesPerPrompt: parseInt(samplesPerPrompt.value) || 1,
-            platforms: authPlatforms
+            samplesPerPrompt: samples,
+            platforms: limitedPlatforms,
+            maxTests: dailyUsage.isUnlimited ? null : availableTests
         });
 
-        console.log('Scan started with platforms:', authPlatforms);
+        console.log('Scan started with platforms:', limitedPlatforms, 'maxTests:', availableTests);
     } catch (error) {
         console.error('Start scan error:', error);
         showMessageModal('Failed to start scan: ' + error, 'Error', 'error');
@@ -1585,7 +1665,7 @@ function updateCountdown(seconds) {
     countdownSeconds.textContent = seconds;
 }
 
-function handleScanComplete(result) {
+async function handleScanComplete(result) {
     console.log('Scan complete:', result);
     console.log('mention_rate raw:', result?.mention_rate, 'citation_rate raw:', result?.citation_rate);
     isScanning = false;
@@ -1616,6 +1696,10 @@ function handleScanComplete(result) {
     showView('complete');
     loadScheduleInfo();
     updateScanRunningIndicator(false);
+
+    // Refresh usage data after scan completes
+    // Results are now pending evaluation, so effectiveRemaining will decrease
+    await refreshDailyUsage();
 }
 
 function handleScanError(error) {
