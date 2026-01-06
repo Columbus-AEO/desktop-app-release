@@ -1,9 +1,9 @@
 [package]
 name = "columbus-desktop"
-version = "1.0.8"
+version = "1.0.9"
 description = "Columbus AI Brand Monitor Desktop App"
 authors = ["Columbus"]
-edition = "2021"
+edition = "2025"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
