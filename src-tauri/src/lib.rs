@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use sysinfo::System;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent, TrayIcon},
@@ -18,8 +19,15 @@ pub use commands::*;
 pub use storage::*;
 pub use webview::*;
 
-// Configuration
+// Configuration - use staging Supabase in debug mode, production in release
+#[cfg(debug_assertions)]
+pub const SUPABASE_URL: &str = "https://inacfgtkjcrlezzzehwn.supabase.co";
+#[cfg(debug_assertions)]
+pub const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImluYWNmZ3RramNybGV6enplaHduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYwOTcwMzcsImV4cCI6MjA4MTY3MzAzN30.mhMrXzzbPqb5HO2bBHSpVU6GFxW9QjcKciviQ2yjc4w";
+
+#[cfg(not(debug_assertions))]
 pub const SUPABASE_URL: &str = "https://yvhzxuoqodutmllfhcsa.supabase.co";
+#[cfg(not(debug_assertions))]
 pub const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl2aHp4dW9xb2R1dG1sbGZoY3NhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM5MDMwOTIsImV4cCI6MjA3OTQ3OTA5Mn0.UxDcyOAGSGKBW26ElQXAyiVC6GRicphIVcrMs8tdkRI";
 
 // Platform URLs (fallback - primary source is ai_platforms table in database)
@@ -31,6 +39,32 @@ pub const PLATFORM_URLS: &[(&str, &str)] = &[
     ("google_aio", "https://www.google.com/"),
 ];
 
+/// Calculate max concurrent webviews based on system RAM
+/// Returns a limit that balances performance with resource usage
+pub fn calculate_max_webviews() -> usize {
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+
+    let total_ram_gb = sys.total_memory() / (1024 * 1024 * 1024);
+
+    let limit = if total_ram_gb <= 4 {
+        5
+    } else if total_ram_gb <= 8 {
+        15
+    } else if total_ram_gb <= 16 {
+        25
+    } else if total_ram_gb <= 32 {
+        35
+    } else if total_ram_gb <= 64 {
+        50
+    } else {
+        80
+    };
+
+    println!("[System] Total RAM: {}GB, max concurrent webviews: {}", total_ram_gb, limit);
+    limit
+}
+
 // Application state
 pub struct AppState {
     pub auth: Mutex<AuthState>,
@@ -40,6 +74,8 @@ pub struct AppState {
     pub active_instance_id: Mutex<String>,
     /// Track webview labels created during scan for cleanup on cancel
     pub scan_webview_labels: Mutex<Vec<String>>,
+    /// Maximum number of concurrent webviews based on system RAM
+    pub max_concurrent_webviews: usize,
 }
 
 impl Default for AppState {
@@ -64,12 +100,16 @@ impl Default for AppState {
         let active_instance = storage::get_active_instance_id();
         println!("[AppState] Active instance ID: {}", if active_instance.is_empty() { "<none>" } else { &active_instance });
 
+        // Calculate max concurrent webviews based on system RAM
+        let max_webviews = calculate_max_webviews();
+
         Self {
             auth: Mutex::new(auth_state),
             scan: Mutex::new(ScanState::default()),
             last_product_id: Mutex::new(persisted.last_product_id),
             active_instance_id: Mutex::new(active_instance),
             scan_webview_labels: Mutex::new(Vec::new()),
+            max_concurrent_webviews: max_webviews,
         }
     }
 }
@@ -326,6 +366,8 @@ pub fn run() {
             commands::proxy::test_static_proxy,
             commands::proxy::has_static_proxy,
             commands::proxy::get_configured_proxy_countries,
+            // PAA (People Also Ask) discovery
+            commands::paa::start_paa_discovery,
             // Instance management
             commands::instance::list_instances,
             commands::instance::get_active_instance,

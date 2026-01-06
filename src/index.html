@@ -390,6 +390,18 @@
         <p class="scan-info" id="scanInfo">Select a product to start scanning</p>
       </div>
 
+      <!-- Keyword Discovery -->
+      <div class="keyword-section">
+        <button id="findKeywordsBtn" class="btn btn-secondary btn-full" disabled>
+          <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <path d="M21 21l-4.35-4.35"></path>
+          </svg>
+          <span class="btn-text">Find Related Keywords</span>
+        </button>
+        <p class="keyword-info" id="keywordInfo">Discover questions from Google's "People Also Ask"</p>
+      </div>
+
       <!-- Dashboard Link -->
       <a href="#" id="dashboardLink" class="dashboard-link">
         Open Dashboard
@@ -484,6 +496,44 @@
         <h3 class="message-modal-title" id="messageModalTitle">Notice</h3>
         <p class="message-modal-text" id="messageModalText"></p>
         <button type="button" class="btn btn-primary message-modal-btn" id="messageModalOkBtn">OK</button>
+      </div>
+    </div>
+
+    <!-- Keyword Discovery Modal -->
+    <div id="keywordModal" class="modal hidden">
+      <div class="modal-overlay" id="keywordModalOverlay"></div>
+      <div class="modal-content modal-small">
+        <div class="modal-header">
+          <h3>Find Related Keywords</h3>
+          <button type="button" class="modal-close" id="closeKeywordModalBtn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="section-hint">Enter a seed keyword to discover related questions from Google's "People Also Ask" section.</p>
+          <div class="form-group">
+            <label for="seedKeywordInput">Seed Keyword</label>
+            <input type="text" id="seedKeywordInput" class="form-input" placeholder="e.g., AI visibility monitoring">
+          </div>
+          <div id="keywordProgress" class="keyword-progress hidden">
+            <div class="progress-container">
+              <div class="progress-bar">
+                <div class="progress-fill" id="keywordProgressFill" style="width: 0%"></div>
+              </div>
+              <span class="progress-text" id="keywordProgressText">0%</span>
+            </div>
+            <p class="keyword-progress-message" id="keywordProgressMessage">Initializing...</p>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="cancelKeywordBtn">Cancel</button>
+            <button type="button" class="btn btn-primary" id="startKeywordBtn">
+              <span class="btn-text">Start Discovery</span>
+              <span class="btn-loading hidden">
+                <svg class="spinner" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="30 70"></circle>
+                </svg>
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

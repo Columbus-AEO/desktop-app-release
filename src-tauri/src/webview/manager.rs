@@ -550,6 +550,7 @@ impl WebviewManager {
         label: &str,
         url: &str,
         platform: &str,
+        visible: bool,
     ) -> Result<(), String> {
         // Get instance-scoped isolated data directory for local/platform
         let instance_id = storage::get_active_instance_id();
@@ -574,7 +575,7 @@ impl WebviewManager {
                 app,
                 label,
                 url,
-                false,
+                visible,
                 None,
                 Some(data_dir.clone()),
             )?;

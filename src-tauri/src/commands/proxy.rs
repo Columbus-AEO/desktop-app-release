@@ -1,11 +1,8 @@
 use crate::storage::{self, CountryPlatformAuth, StaticProxy};
-use crate::AppState;
+use crate::{AppState, SUPABASE_URL};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-
-// Use the same Supabase URL as the rest of the app
-const API_BASE_URL: &str = "https://yvhzxuoqodutmllfhcsa.supabase.co/functions/v1";
 
 /// Response from the proxy-config API (new static proxy format)
 #[derive(Serialize, Deserialize, Debug)]
@@ -88,7 +85,7 @@ pub async fn fetch_proxy_config(
 
     let client = reqwest::Client::new();
     let response = client
-        .get(&format!("{}/proxy-config", API_BASE_URL))
+        .get(&format!("{}/functions/v1/proxy-config", SUPABASE_URL))
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await

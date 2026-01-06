@@ -354,6 +354,16 @@ function setupEventListeners() {
     // Message Modal
     document.getElementById('messageModalOverlay')?.addEventListener('click', hideMessageModal);
     document.getElementById('messageModalOkBtn')?.addEventListener('click', hideMessageModal);
+
+    // Keyword Discovery
+    document.getElementById('findKeywordsBtn')?.addEventListener('click', showKeywordModal);
+    document.getElementById('closeKeywordModalBtn')?.addEventListener('click', hideKeywordModal);
+    document.getElementById('keywordModalOverlay')?.addEventListener('click', hideKeywordModal);
+    document.getElementById('cancelKeywordBtn')?.addEventListener('click', hideKeywordModal);
+    document.getElementById('startKeywordBtn')?.addEventListener('click', handleStartKeywordDiscovery);
+    document.getElementById('seedKeywordInput')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleStartKeywordDiscovery();
+    });
 }
 
 // ==================== Message Modal ====================
@@ -1095,6 +1105,7 @@ async function loadProducts() {
 
         updateAuthStatusGrid();
         updateScanButtonState();
+        updateKeywordButtonState();
     } catch (error) {
         console.error('Failed to load products:', error);
     }
@@ -1112,6 +1123,7 @@ async function handleProductChange() {
         await loadProductPromptCount(selectedProductId);
     }
     updateScanButtonState();
+    updateKeywordButtonState();
 }
 
 async function loadProductPromptCount(productId) {
@@ -1900,6 +1912,129 @@ async function saveInstanceRename() {
     } catch (e) {
         console.error('Failed to rename instance:', e);
         alert('Failed to rename instance: ' + (e.message || e));
+    }
+}
+
+// ==================== Keyword Discovery ====================
+let isDiscoveringKeywords = false;
+
+function showKeywordModal() {
+    if (!selectedProductId) {
+        showMessageModal('Please select a product first.', 'No Product Selected', 'warning');
+        return;
+    }
+    document.getElementById('keywordModal')?.classList.remove('hidden');
+    document.getElementById('seedKeywordInput')?.focus();
+}
+
+function hideKeywordModal(force = false) {
+    if (isDiscoveringKeywords && !force) return; // Don't close while discovering (unless forced)
+    document.getElementById('keywordModal')?.classList.add('hidden');
+    document.getElementById('seedKeywordInput').value = '';
+    document.getElementById('keywordProgress')?.classList.add('hidden');
+}
+
+async function handleStartKeywordDiscovery() {
+    const seedKeywordInput = document.getElementById('seedKeywordInput');
+    const seedKeyword = seedKeywordInput?.value?.trim();
+
+    if (!seedKeyword) {
+        hideKeywordModal(true);
+        showMessageModal('Please enter a seed keyword.', 'Keyword Required', 'warning');
+        return;
+    }
+
+    if (!selectedProductId) {
+        hideKeywordModal(true);
+        showMessageModal('Please select a product first.', 'No Product Selected', 'warning');
+        return;
+    }
+
+    if (isDiscoveringKeywords) return;
+
+    isDiscoveringKeywords = true;
+    const startBtn = document.getElementById('startKeywordBtn');
+    const cancelBtn = document.getElementById('cancelKeywordBtn');
+    const progressSection = document.getElementById('keywordProgress');
+
+    // Update UI
+    if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.querySelector('.btn-text').classList.add('hidden');
+        startBtn.querySelector('.btn-loading').classList.remove('hidden');
+    }
+    if (cancelBtn) cancelBtn.disabled = true;
+    if (progressSection) progressSection.classList.remove('hidden');
+
+    try {
+        console.log(`[Keyword Discovery] Starting with keyword: ${seedKeyword} for product: ${selectedProductId}`);
+
+        const result = await invoke('start_paa_discovery', {
+            productId: selectedProductId,
+            seedKeyword: seedKeyword
+        });
+
+        console.log('[Keyword Discovery] Result:', result);
+
+        // Always close the keyword modal first before showing any result modal
+        hideKeywordModal(true);
+
+        if (result.code === 'RATE_LIMIT_EXCEEDED') {
+            showMessageModal(result.message || 'Rate limit exceeded. Please try again later.', 'Rate Limited', 'warning');
+        } else if (result.code === 'GOOGLE_AUTH_REQUIRED') {
+            showMessageModal(result.message || 'Please authenticate Google AI Overview first.', 'Authentication Required', 'warning');
+        } else if (result.code === 'NO_PAA_FOUND') {
+            showMessageModal(result.message || 'No "People Also Ask" section found. Try a different keyword.', 'No Results', 'info');
+        } else if (!result.success && result.error) {
+            showMessageModal(result.message || result.error || 'Failed to discover keywords.', 'Error', 'error');
+        } else if (result.success) {
+            showMessageModal(
+                'The discovered questions will be analyzed and should be available in your Columbus Dashboard shortly.',
+                'Discovery Complete',
+                'success'
+            );
+        } else if (result.error) {
+            showMessageModal(result.error, 'Discovery Failed', 'error');
+        }
+    } catch (e) {
+        console.error('[Keyword Discovery] Error:', e);
+        hideKeywordModal(true);
+        showMessageModal(e.message || 'Failed to discover keywords', 'Error', 'error');
+    } finally {
+        isDiscoveringKeywords = false;
+
+        // Reset UI
+        if (startBtn) {
+            startBtn.disabled = false;
+            startBtn.querySelector('.btn-text').classList.remove('hidden');
+            startBtn.querySelector('.btn-loading').classList.add('hidden');
+        }
+        if (cancelBtn) cancelBtn.disabled = false;
+        if (progressSection) progressSection.classList.add('hidden');
+    }
+}
+
+function updateKeywordProgress(progress) {
+    const progressFill = document.getElementById('keywordProgressFill');
+    const progressText = document.getElementById('keywordProgressText');
+    const progressMessage = document.getElementById('keywordProgressMessage');
+
+    if (progressFill) progressFill.style.width = `${progress.current}%`;
+    if (progressText) progressText.textContent = `${progress.current}%`;
+    if (progressMessage) progressMessage.textContent = progress.message || 'Processing...';
+}
+
+// Listen for PAA progress events
+listen('paa:progress', (event) => {
+    console.log('[Keyword Discovery] Progress:', event.payload);
+    updateKeywordProgress(event.payload);
+});
+
+// Update keyword button state when product changes
+function updateKeywordButtonState() {
+    const btn = document.getElementById('findKeywordsBtn');
+    if (btn) {
+        btn.disabled = !selectedProductId || isScanning;
     }
 }
 

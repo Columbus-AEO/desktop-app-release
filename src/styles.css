@@ -934,6 +934,30 @@ div.platform-icon.google_aio { background: #4285f4; }
   font-size: 12px;
   color: #6b7280;
   text-align: center;
+}
+
+/* Keyword Section */
+.keyword-section {
+  margin-bottom: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.keyword-info {
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
+  margin-top: 8px;
+}
+
+.keyword-progress {
+  margin: 16px 0;
+}
+
+.keyword-progress-message {
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
   margin-top: 8px;
 }
 
