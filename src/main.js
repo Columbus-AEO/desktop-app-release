@@ -278,6 +278,11 @@ function setupEventListeners() {
         invoke('open_url_in_browser', { url: DASHBOARD_URL });
     });
 
+    // Tutorial button - opens YouTube video
+    document.getElementById('tutorialBtn')?.addEventListener('click', () => {
+        invoke('open_url_in_browser', { url: 'https://youtu.be/WMK1jlnEuAg' });
+    });
+
     // Settings
     document.getElementById('settingsBtn')?.addEventListener('click', () => {
         settingsModal.classList.remove('hidden');
@@ -318,7 +323,9 @@ function setupEventListeners() {
     document.getElementById('continueToAuthBtn')?.addEventListener('click', handleOnboardingContinue);
 
     // Region Auth View
-    document.getElementById('backToMainBtn')?.addEventListener('click', () => {
+    document.getElementById('backToMainBtn')?.addEventListener('click', async () => {
+        // Mark onboarding as complete when user finishes auth setup
+        await invoke('set_onboarding_completed', { completed: true });
         showView('main');
         updateAuthStatusGrid();
     });
@@ -590,7 +597,7 @@ async function checkAuthStatus() {
                 showView('scanning');
                 const progress = await invoke('get_scan_progress');
                 updateScanProgress(progress);
-            } else if (configuredRegions.length === 1 && configuredRegions[0] === 'local' && !hasAnyAuth()) {
+            } else if (!await invoke('is_onboarding_completed')) {
                 // First time - show onboarding
                 renderOnboardingRegions();
                 showView('onboarding');

@@ -377,6 +377,8 @@ pub fn run() {
             commands::instance::rename_instance,
             commands::instance::switch_instance,
             commands::instance::get_instance_summary,
+            commands::instance::is_onboarding_completed,
+            commands::instance::set_onboarding_completed,
         ])
         .setup(|app| {
             println!("[Columbus] Setup starting...");

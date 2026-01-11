@@ -52,8 +52,23 @@
     <div id="onboardingView" class="view hidden">
       <div class="onboarding-container">
         <h2>Welcome to Columbus</h2>
-        <p class="subtitle">Select the regions you want to scan from.</p>
-        <p class="hint">You can add more regions later in Settings.</p>
+        <p class="subtitle">Let's get you set up in 2 minutes.</p>
+
+        <!-- Tutorial Video -->
+        <div class="tutorial-video-section">
+          <div class="video-wrapper">
+            <iframe
+              src="https://www.youtube.com/embed/WMK1jlnEuAg?rel=0"
+              title="Columbus Setup Tutorial"
+              frameborder="0"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowfullscreen>
+            </iframe>
+          </div>
+          <p class="video-hint">Watch this quick tutorial or continue below</p>
+        </div>
+
+        <p class="hint" style="margin-top: 16px;">Select the regions you want to scan from. You can add more later in Settings.</p>
 
         <div class="regions-selection" id="onboardingRegions">
           <!-- Dynamically populated from API -->
@@ -218,6 +233,11 @@
       <!-- User Info -->
       <div class="user-info">
         <span id="userEmail" class="user-email"></span>
+        <button id="tutorialBtn" class="text-btn" title="Watch Tutorial">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+        </button>
         <button id="settingsBtn" class="text-btn" title="Settings">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"></circle>

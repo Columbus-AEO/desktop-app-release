@@ -88,3 +88,25 @@ pub struct InstanceSummary {
     pub authenticated_count: usize,
     pub onboarding_completed: bool,
 }
+
+/// Check if onboarding has been completed for the active instance
+#[tauri::command]
+pub fn is_onboarding_completed() -> bool {
+    let instance_id = storage::get_active_instance_id();
+    if !instance_id.is_empty() {
+        storage::is_instance_onboarding_completed(&instance_id)
+    } else {
+        storage::is_onboarding_completed()
+    }
+}
+
+/// Mark onboarding as completed for the active instance
+#[tauri::command]
+pub fn set_onboarding_completed(completed: bool) -> Result<(), String> {
+    let instance_id = storage::get_active_instance_id();
+    if !instance_id.is_empty() {
+        storage::set_instance_onboarding_completed(&instance_id, completed)
+    } else {
+        storage::set_onboarding_completed(completed)
+    }
+}
