@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base styles */
+body {
+  @apply font-sans antialiased;
+  overflow: hidden;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-100;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-300 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-400;
+}
+
+/* Platform colors */
+.platform-chatgpt {
+  @apply bg-green-500;
+}
+
+.platform-claude {
+  @apply bg-orange-500;
+}
+
+.platform-gemini {
+  @apply bg-blue-500;
+}
+
+.platform-perplexity {
+  @apply bg-cyan-500;
+}
+
+.platform-google_aio {
+  @apply bg-yellow-500;
+}
+
+.platform-google_ai_mode {
+  @apply bg-purple-500;
+}
+
+/* Animations */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.8);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.5s ease-out infinite;
+}

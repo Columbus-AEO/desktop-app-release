@@ -162,6 +162,13 @@ pub async fn start_scan_internal(
     // Update tray to show scanning
     update_tray_status(&app, true);
 
+    // Emit scan started event so UI can switch to scanning view
+    let _ = app.emit("scan:started", serde_json::json!({
+        "productId": product_id,
+        "totalPrompts": total_prompt_executions * samples * platform_count,
+        "platforms": selected_platforms,
+    }));
+
     // Emit initial progress
     emit_progress_with_state(&app, &state);
 
