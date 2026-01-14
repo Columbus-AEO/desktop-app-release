@@ -1,6 +1,6 @@
 export const DASHBOARD_URL = 'https://columbus-aeo.com/dashboard'
 export const SIGNUP_URL = 'https://columbus-aeo.com/signup'
-export const TUTORIAL_URL = 'https://youtu.be/WMK1jlnEuAg'
+export const TUTORIAL_URL = 'https://youtu.be/I8Fo_jJYZyI'
 
 // Supabase configuration
 export const SUPABASE_URL = 'https://yvhzxuoqodutmllfhcsa.supabase.co'
