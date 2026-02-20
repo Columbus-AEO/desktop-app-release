@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::RwLock as TokioRwLock;
 use uuid::Uuid;
 
 #[derive(Clone, Serialize)]
@@ -230,66 +230,415 @@ struct WebviewTask {
     label: String,
     country_code: String,
     platform: String,
+    #[allow(dead_code)]
     prompt_idx: usize,
     prompt: Prompt,
+    #[allow(dead_code)]
     sample: usize,
     is_local: bool,
 }
 
-/// Result of a scan task
-struct ScanTaskResult {
-    webview_label: String,
-    platform: String,
-    country_code: String,
-    prompt: Prompt,
-    response: Option<crate::webview::CollectResponse>,
-    error: Option<String>,
+/// Group tasks by platform for concurrent per-platform execution
+fn group_tasks_by_platform(tasks: &[WebviewTask]) -> HashMap<String, Vec<WebviewTask>> {
+    let mut platform_tasks: HashMap<String, Vec<WebviewTask>> = HashMap::new();
+
+    for task in tasks {
+        platform_tasks
+            .entry(task.platform.clone())
+            .or_insert_with(Vec::new)
+            .push(task.clone());
+    }
+
+    platform_tasks
 }
 
-/// Build batches that respect platform-specific concurrent limits
-/// Claude has a limit of 3 concurrent windows, other platforms use the general max
-fn build_smart_batches(
-    tasks: &[WebviewTask],
-    max_concurrent: usize,
-    claude_max: usize,
-) -> Vec<Vec<WebviewTask>> {
-    let mut batches: Vec<Vec<WebviewTask>> = Vec::new();
-    let mut remaining: Vec<WebviewTask> = tasks.to_vec();
+/// Get the wait time in seconds for a specific platform
+/// Some platforms respond faster than others
+fn get_platform_wait_time(platform: &str) -> u64 {
+    match platform {
+        "google_aio" => 20,      // Google AIO is typically fast
+        "google_ai_mode" => 25,  // Google AI Mode needs a bit more time
+        "perplexity" => 35,      // Perplexity searches take time
+        "gemini" => 40,          // Gemini is moderate
+        "chatgpt" => 45,         // ChatGPT can be slow
+        "claude" => 45,          // Claude can also be slow
+        _ => 45,                 // Default to conservative wait
+    }
+}
 
-    while !remaining.is_empty() {
-        let mut batch: Vec<WebviewTask> = Vec::new();
-        let mut claude_count = 0;
-        let mut indices_to_remove: Vec<usize> = Vec::new();
+/// Submit a prompt to a webview without needing the WebviewManager lock
+/// This is safe to call concurrently from multiple platform tasks
+async fn submit_prompt_standalone(
+    app: &AppHandle,
+    label: &str,
+    platform: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window(label)
+        .ok_or("Webview not found")?;
 
-        for (i, task) in remaining.iter().enumerate() {
-            // Check if batch is full
-            if batch.len() >= max_concurrent {
-                break;
-            }
+    eprintln!("[Scan] Submitting prompt to {} in webview {}", platform, label);
 
-            // Check Claude-specific limit
-            if task.platform == "claude" {
-                if claude_count >= claude_max {
-                    continue; // Skip this Claude task, try to add other platforms
+    let script = crate::webview::get_submit_script(platform, prompt);
+    window
+        .eval(&script)
+        .map_err(|e| format!("Script error: {}", e))?;
+
+    Ok(())
+}
+
+/// Collect a response from a webview without needing the WebviewManager lock
+/// This is safe to call concurrently from multiple platform tasks
+async fn collect_response_standalone(
+    app: &AppHandle,
+    label: &str,
+    platform: &str,
+    brand: &str,
+    brand_domain: Option<&str>,
+    domain_aliases: Option<&[String]>,
+    competitors: &[String],
+) -> Result<crate::webview::CollectResponse, String> {
+    let window = app
+        .get_webview_window(label)
+        .ok_or("Webview not found")?;
+
+    eprintln!("[Scan] Collecting response from {} in webview {}", platform, label);
+
+    // For Gemini, click the Sources button first to open the sidebar
+    if platform == "gemini" {
+        let open_sources_script = r#"
+            (function() {
+                const sourcesButton = document.querySelector('button.legacy-sources-sidebar-button, button[class*="sources-sidebar"], button mat-icon[fonticon="link"]');
+                if (sourcesButton) {
+                    const btn = sourcesButton.closest('button') || sourcesButton;
+                    btn.click();
                 }
-                claude_count += 1;
+            })();
+        "#;
+        window.eval(open_sources_script).ok();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    }
+
+    // For Perplexity, click the sources button to expand the sources panel
+    if platform == "perplexity" {
+        let open_sources_script = r#"
+            (function() {
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    const text = btn.textContent?.toLowerCase() || '';
+                    if (/\d+\s*(quellen|sources|source)/i.test(text)) {
+                        btn.click();
+                        return;
+                    }
+                    const favicons = btn.querySelectorAll('img[alt*="favicon"]');
+                    if (favicons.length >= 2) {
+                        btn.click();
+                        return;
+                    }
+                }
+            })();
+        "#;
+        window.eval(open_sources_script).ok();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    }
+
+    // For Google AI Overview, click "Show more" and "Show all" buttons
+    if platform == "google_aio" {
+        let expand_aio_script = r#"
+            (async function() {
+                let showMoreBtn = document.querySelector('div.Jzkafd[aria-label="Show more AI Overview"]');
+                if (!showMoreBtn) showMoreBtn = document.querySelector('div[aria-label="Show more AI Overview"]');
+                if (!showMoreBtn) showMoreBtn = document.querySelector('[aria-label*="Show more"][aria-label*="AI Overview"]');
+                if (showMoreBtn) {
+                    const clickable = showMoreBtn.querySelector('div.in7vHe') || showMoreBtn;
+                    clickable.click();
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+                let showAllBtn = document.querySelector('div.BjvG9b[aria-label="Show all related links"]');
+                if (!showAllBtn) showAllBtn = document.querySelector('div[aria-label="Show all related links"]');
+                if (!showAllBtn) showAllBtn = document.querySelector('[aria-label*="Show all"]');
+                if (showAllBtn) {
+                    showAllBtn.click();
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+            })();
+        "#;
+        window.eval(expand_aio_script).ok();
+        tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+    }
+
+    // Inject script that collects response
+    let script = crate::webview::get_collect_script(platform, brand, brand_domain, domain_aliases, competitors);
+    window
+        .eval(&script)
+        .map_err(|e| format!("Script error: {}", e))?;
+
+    // Wait for script to execute
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    // Read the URL which contains our result in the hash
+    let url = window.url().map_err(|e| format!("Failed to get URL: {}", e))?;
+    let url_str = url.as_str();
+
+    // Parse the result from URL hash
+    if let Some(hash_pos) = url_str.find("#COLUMBUS_RESULT:") {
+        let data = &url_str[hash_pos + 17..];
+        match crate::webview::decode_base64_and_parse(data) {
+            Ok(response) => {
+                eprintln!("[Scan] Parsed response: brand_mentioned={}, citation_present={}",
+                         response.brand_mentioned, response.citation_present);
+                return Ok(response);
             }
-
-            batch.push(task.clone());
-            indices_to_remove.push(i);
-        }
-
-        // Remove added tasks from remaining (in reverse order to preserve indices)
-        for i in indices_to_remove.into_iter().rev() {
-            remaining.remove(i);
-        }
-
-        if !batch.is_empty() {
-            batches.push(batch);
+            Err(e) => {
+                eprintln!("[Scan] Failed to parse result: {}", e);
+            }
         }
     }
 
-    batches
+    // Fallback: return empty response
+    Ok(crate::webview::CollectResponse::default())
+}
+
+/// Result from processing all prompts for a single platform
+struct PlatformScanResult {
+    platform: String,
+    collected: usize,
+    mentioned: usize,
+    cited: usize,
+    failed: usize,
+}
+
+/// Process all prompts for a single platform sequentially
+/// This runs as an independent task, one per platform
+async fn run_platform_scan(
+    app: AppHandle,
+    state: Arc<AppState>,
+    manager: Arc<TokioRwLock<WebviewManager>>,
+    platform: String,
+    tasks: Vec<WebviewTask>,
+    scan_session_id: String,
+    product_id: String,
+    brand: String,
+    brand_domain: Option<String>,
+    domain_aliases: Option<Vec<String>>,
+    competitors: Vec<String>,
+    token: Option<String>,
+) -> PlatformScanResult {
+    let client = reqwest::Client::new();
+    let is_visible = cfg!(debug_assertions);
+    let wait_seconds = get_platform_wait_time(&platform);
+
+    let mut collected = 0;
+    let mut mentioned = 0;
+    let mut cited = 0;
+    let mut failed = 0;
+
+    eprintln!("[Scan/{}] Starting platform scan with {} tasks", platform, tasks.len());
+
+    for (task_idx, task) in tasks.iter().enumerate() {
+        // Check cancellation
+        if !state.scan.lock().is_running {
+            eprintln!("[Scan/{}] Cancelled at task {}/{}", platform, task_idx + 1, tasks.len());
+            break;
+        }
+
+        eprintln!("[Scan/{}] Processing task {}/{}: {}", platform, task_idx + 1, tasks.len(), task.label);
+
+        // === STEP 1: Create webview ===
+        let url = match get_platform_url(&task.platform) {
+            Some(u) => u,
+            None => {
+                eprintln!("[Scan/{}] Unknown platform URL, skipping", platform);
+                failed += 1;
+                continue;
+            }
+        };
+
+        let create_result = if task.is_local {
+            manager.write().await.create_webview_local(&app, &task.label, &url, is_visible, &task.platform)
+        } else {
+            manager.write().await.create_webview_for_country(&app, &task.label, &url, is_visible, &task.country_code, &task.platform).await
+        };
+
+        if create_result.is_err() {
+            eprintln!("[Scan/{}] Failed to create webview: {:?}", platform, create_result.err());
+            failed += 1;
+            {
+                let mut scan = state.scan.lock();
+                if let Some(ps) = scan.platforms.get_mut(&platform) {
+                    ps.failed += 1;
+                }
+            }
+            emit_progress_with_state(&app, &state);
+            continue;
+        }
+
+        // Track webview label
+        state.scan_webview_labels.lock().push(task.label.clone());
+
+        // === STEP 2: Wait for page to load ===
+        for _ in 0..10 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if !state.scan.lock().is_running {
+                // Cleanup and exit
+                manager.write().await.close_webview(&app, &task.label);
+                state.scan_webview_labels.lock().retain(|l| l != &task.label);
+                eprintln!("[Scan/{}] Cancelled during page load", platform);
+                return PlatformScanResult { platform, collected, mentioned, cited, failed };
+            }
+        }
+
+        // === STEP 3: Submit prompt (no lock needed - uses standalone function) ===
+        let submit_result = submit_prompt_standalone(&app, &task.label, &task.platform, &task.prompt.text).await;
+
+        // For google_ai_mode, wait and submit again (handles navigation)
+        if task.platform == "google_ai_mode" {
+            for _ in 0..8 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                if !state.scan.lock().is_running {
+                    break;
+                }
+            }
+            if state.scan.lock().is_running {
+                let _ = submit_prompt_standalone(&app, &task.label, &task.platform, &task.prompt.text).await;
+            }
+        }
+
+        if submit_result.is_err() {
+            eprintln!("[Scan/{}] Failed to submit prompt: {:?}", platform, submit_result.err());
+            manager.write().await.close_webview(&app, &task.label);
+            state.scan_webview_labels.lock().retain(|l| l != &task.label);
+            failed += 1;
+            {
+                let mut scan = state.scan.lock();
+                if let Some(ps) = scan.platforms.get_mut(&platform) {
+                    ps.failed += 1;
+                }
+            }
+            emit_progress_with_state(&app, &state);
+            continue;
+        }
+
+        // Update submitted count
+        {
+            let mut scan = state.scan.lock();
+            if let Some(ps) = scan.platforms.get_mut(&platform) {
+                ps.submitted += 1;
+                ps.status = "submitting".to_string();
+            }
+        }
+        emit_progress_with_state(&app, &state);
+
+        // === STEP 4: Wait for AI response ===
+        for _ in 0..wait_seconds {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if !state.scan.lock().is_running {
+                manager.write().await.close_webview(&app, &task.label);
+                state.scan_webview_labels.lock().retain(|l| l != &task.label);
+                eprintln!("[Scan/{}] Cancelled during response wait", platform);
+                return PlatformScanResult { platform, collected, mentioned, cited, failed };
+            }
+        }
+
+        // === STEP 5: Collect response (no lock needed - uses standalone function) ===
+        let collect_result = collect_response_standalone(
+            &app,
+            &task.label,
+            &task.platform,
+            &brand,
+            brand_domain.as_deref(),
+            domain_aliases.as_deref(),
+            &competitors,
+        ).await;
+
+        // Close webview after collecting
+        manager.write().await.close_webview(&app, &task.label);
+        state.scan_webview_labels.lock().retain(|l| l != &task.label);
+
+        match collect_result {
+            Ok(response) => {
+                collected += 1;
+                if response.brand_mentioned {
+                    mentioned += 1;
+                }
+                if response.citation_present {
+                    cited += 1;
+                }
+
+                // Update platform stats
+                {
+                    let mut scan = state.scan.lock();
+                    if let Some(ps) = scan.platforms.get_mut(&platform) {
+                        ps.collected += 1;
+                    }
+                    scan.completed_prompts += 1;
+                }
+                emit_progress_with_state(&app, &state);
+
+                // Submit to API
+                if let Some(ref token) = token {
+                    let api_result = ScanResult {
+                        product_id: product_id.clone(),
+                        scan_session_id: scan_session_id.clone(),
+                        platform: platform.clone(),
+                        prompt_id: task.prompt.id.clone(),
+                        prompt_text: task.prompt.text.clone(),
+                        response_text: response.response_text,
+                        brand_mentioned: response.brand_mentioned,
+                        citation_present: response.citation_present,
+                        position: response.position,
+                        sentiment: response.sentiment.clone(),
+                        competitor_mentions: response.competitor_mentions,
+                        competitor_details: response.competitor_details.iter().map(|cd| {
+                            crate::CompetitorDetailResult {
+                                name: cd.name.clone(),
+                                position: cd.position,
+                                sentiment: cd.sentiment.clone(),
+                            }
+                        }).collect(),
+                        citations: response.citations,
+                        credits_exhausted: response.credits_exhausted,
+                        chat_url: response.chat_url,
+                        request_country: Some(task.country_code.clone()),
+                    };
+
+                    match client
+                        .post(format!("{}/functions/v1/extension-scan-results", crate::SUPABASE_URL))
+                        .header("Authorization", format!("Bearer {}", token))
+                        .header("apikey", crate::SUPABASE_ANON_KEY)
+                        .header("Content-Type", "application/json")
+                        .json(&api_result)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                eprintln!("[Scan/{}] API submission failed: {}", platform, resp.status());
+                            }
+                        }
+                        Err(e) => eprintln!("[Scan/{}] API request error: {}", platform, e),
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[Scan/{}] Collection failed: {}", platform, e);
+                failed += 1;
+                {
+                    let mut scan = state.scan.lock();
+                    if let Some(ps) = scan.platforms.get_mut(&platform) {
+                        ps.failed += 1;
+                    }
+                }
+                emit_progress_with_state(&app, &state);
+            }
+        }
+    }
+
+    eprintln!("[Scan/{}] Platform scan complete: collected={}, mentioned={}, cited={}, failed={}",
+              platform, collected, mentioned, cited, failed);
+
+    PlatformScanResult { platform, collected, mentioned, cited, failed }
 }
 
 async fn run_scan(
@@ -306,8 +655,10 @@ async fn run_scan(
     selected_platforms: Vec<String>,
     scan_countries: Vec<String>,
 ) -> Result<ScanComplete, String> {
-    // Use a thread-safe manager wrapped in Arc<TokioMutex>
-    let manager = Arc::new(TokioMutex::new(WebviewManager::new()));
+    // Use a thread-safe manager wrapped in Arc<TokioRwLock>
+    // RwLock allows concurrent reads (submit_prompt, collect_response)
+    // while write operations (create_webview, close_webview) get exclusive access
+    let manager = Arc::new(TokioRwLock::new(WebviewManager::new()));
 
     // Clear any previous scan webview labels
     {
@@ -409,388 +760,90 @@ async fn run_scan(
 
     eprintln!("[Scan] Total webview tasks to process: {}", webview_tasks.len());
 
-    // Helper to check if scan is cancelled
-    fn is_scan_running(state: &Arc<AppState>) -> bool {
-        state.scan.lock().is_running
+    // Get token once for all API submissions
+    let token = crate::commands::auth::ensure_valid_token(&state).await.ok();
+
+    // Group tasks by platform for concurrent execution
+    let platform_tasks = group_tasks_by_platform(&webview_tasks);
+    let num_platforms = platform_tasks.len();
+
+    eprintln!("[Scan] Running {} platforms concurrently (one prompt at a time per platform)", num_platforms);
+    for (platform, tasks) in &platform_tasks {
+        eprintln!("[Scan]   {} - {} tasks", platform, tasks.len());
     }
 
-    let is_visible = cfg!(debug_assertions);
+    // Update phase to submitting - all platforms will run concurrently
+    {
+        let mut scan = state.scan.lock();
+        scan.phase = "submitting".to_string();
+        for platform_str in &selected_platforms {
+            if let Some(ps) = scan.platforms.get_mut(platform_str) {
+                ps.status = "running".to_string();
+            }
+        }
+    }
+    emit_progress_with_state(&app, &state);
 
-    // Get max concurrent webviews based on system RAM
-    let max_concurrent = state.max_concurrent_webviews;
+    // Spawn one task per platform - all run concurrently
+    let mut platform_handles = Vec::new();
 
-    // Platform-specific concurrent limits (Claude blocks more than 3 open windows)
-    const CLAUDE_MAX_CONCURRENT: usize = 3;
+    for (platform, tasks) in platform_tasks {
+        let app_clone = app.clone();
+        let state_clone = state.clone();
+        let manager_clone = manager.clone();
+        let scan_session_id_clone = scan_session_id.clone();
+        let product_id_clone = product_id.clone();
+        let brand_clone = brand.clone();
+        let brand_domain_clone = brand_domain.clone();
+        let domain_aliases_clone = domain_aliases.clone();
+        let competitors_clone = competitors.clone();
+        let token_clone = token.clone();
 
-    // Build smart batches that respect platform-specific limits
-    let batches = build_smart_batches(&webview_tasks, max_concurrent, CLAUDE_MAX_CONCURRENT);
-    let num_batches = batches.len();
-    let total_tasks = webview_tasks.len();
+        let handle = tokio::spawn(async move {
+            run_platform_scan(
+                app_clone,
+                state_clone,
+                manager_clone,
+                platform,
+                tasks,
+                scan_session_id_clone,
+                product_id_clone,
+                brand_clone,
+                brand_domain_clone,
+                domain_aliases_clone,
+                competitors_clone,
+                token_clone,
+            ).await
+        });
 
-    eprintln!("[Scan] RAM limit: {} concurrent webviews, Claude limit: {}, processing in {} batches", max_concurrent, CLAUDE_MAX_CONCURRENT, num_batches);
+        platform_handles.push(handle);
+    }
 
-    // Track aggregated results across all batches
+    // Wait for all platforms to complete
+    let platform_results = futures::future::join_all(platform_handles).await;
+
+    // Aggregate results from all platforms
     let mut total_collected = 0;
     let mut total_mentioned = 0;
     let mut total_cited = 0;
-    let mut batch_number = 0;
 
-    // Get token once for all API submissions
-    let token = crate::commands::auth::ensure_valid_token(&state).await.ok();
-    let client = reqwest::Client::new();
-
-    // Process webviews in batches - each batch completes its full lifecycle before next
-    for batch in &batches {
-        batch_number += 1;
-
-        // Check cancellation before starting batch
-        if !is_scan_running(&state) {
-            eprintln!("[Scan] Cancelled before batch {}", batch_number);
-            break;
-        }
-
-        eprintln!("[Scan] === Processing batch {}/{} ({} webviews) ===", batch_number, num_batches, batch.len());
-
-        // =============================================================
-        // BATCH PHASE 1: Create webviews in this batch
-        // =============================================================
-        {
-            let mut scan = state.scan.lock();
-            scan.phase = "submitting".to_string();
-        }
-        emit_progress_with_state(&app, &state);
-
-        let mut batch_created_labels: Vec<String> = Vec::new();
-        let mut batch_submitted_labels: Vec<String> = Vec::new();
-
-        for task in batch {
-            if !is_scan_running(&state) {
-                eprintln!("[Scan] Cancelled during webview creation in batch {}", batch_number);
-                break;
+    for result in platform_results {
+        match result {
+            Ok(platform_result) => {
+                eprintln!("[Scan] Platform {} finished: collected={}, mentioned={}, cited={}, failed={}",
+                          platform_result.platform, platform_result.collected, platform_result.mentioned,
+                          platform_result.cited, platform_result.failed);
+                total_collected += platform_result.collected;
+                total_mentioned += platform_result.mentioned;
+                total_cited += platform_result.cited;
             }
-
-            let url = match get_platform_url(&task.platform) {
-                Some(u) => u,
-                None => {
-                    eprintln!("[Scan] Unknown platform: {}", task.platform);
-                    continue;
-                }
-            };
-
-            eprintln!("[Scan] Creating webview: {}", task.label);
-
-            let create_result = {
-                let mut mgr = manager.lock().await;
-                if task.is_local {
-                    mgr.create_webview_local(&app, &task.label, &url, is_visible, &task.platform)
-                } else {
-                    mgr.create_webview_for_country(&app, &task.label, &url, is_visible, &task.country_code, &task.platform).await
-                }
-            };
-
-            match create_result {
-                Ok(_) => {
-                    batch_created_labels.push(task.label.clone());
-                    state.scan_webview_labels.lock().push(task.label.clone());
-                }
-                Err(e) => {
-                    eprintln!("[Scan] Failed to create webview {}: {}", task.label, e);
-                }
+            Err(e) => {
+                eprintln!("[Scan] Platform task panicked: {}", e);
             }
         }
-
-        eprintln!("[Scan] Batch {}: Created {} webviews", batch_number, batch_created_labels.len());
-
-        if batch_created_labels.is_empty() {
-            eprintln!("[Scan] Batch {}: No webviews created, skipping to next batch", batch_number);
-            continue;
-        }
-
-        // =============================================================
-        // BATCH PHASE 2: Wait for pages to load (~5 seconds)
-        // =============================================================
-        eprintln!("[Scan] Batch {}: Waiting for pages to load...", batch_number);
-        for _ in 0..10 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            if !is_scan_running(&state) {
-                eprintln!("[Scan] Cancelled during page load wait in batch {}", batch_number);
-                // Close batch webviews before returning
-                let mut mgr = manager.lock().await;
-                for label in &batch_created_labels {
-                    mgr.close_webview(&app, label);
-                }
-                return Err("Scan cancelled".to_string());
-            }
-        }
-
-        // =============================================================
-        // BATCH PHASE 3: Submit prompts to webviews in this batch
-        // =============================================================
-        for task in batch {
-            if !batch_created_labels.contains(&task.label) {
-                continue;
-            }
-
-            if !is_scan_running(&state) {
-                eprintln!("[Scan] Cancelled during prompt submission in batch {}", batch_number);
-                break;
-            }
-
-            eprintln!("[Scan] Submitting prompt to: {}", task.label);
-
-            let submit_result = {
-                let mgr = manager.lock().await;
-                mgr.submit_prompt(&app, &task.label, &task.platform, &task.prompt.text).await
-            };
-
-            // For google_ai_mode, wait and submit again (handles navigation)
-            if task.platform == "google_ai_mode" {
-                for _ in 0..8 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                    if !is_scan_running(&state) {
-                        break;
-                    }
-                }
-                if is_scan_running(&state) {
-                    let mgr = manager.lock().await;
-                    let _ = mgr.submit_prompt(&app, &task.label, &task.platform, &task.prompt.text).await;
-                }
-            }
-
-            if submit_result.is_ok() {
-                batch_submitted_labels.push(task.label.clone());
-                {
-                    let mut scan = state.scan.lock();
-                    if let Some(ps) = scan.platforms.get_mut(&task.platform) {
-                        ps.submitted += 1;
-                        ps.status = "submitting".to_string();
-                    }
-                }
-                emit_progress_with_state(&app, &state);
-            }
-        }
-
-        eprintln!("[Scan] Batch {}: Submitted {} prompts", batch_number, batch_submitted_labels.len());
-
-        if batch_submitted_labels.is_empty() {
-            eprintln!("[Scan] Batch {}: No prompts submitted, closing webviews and skipping", batch_number);
-            let mut mgr = manager.lock().await;
-            for label in &batch_created_labels {
-                mgr.close_webview(&app, label);
-            }
-            {
-                let mut labels = state.scan_webview_labels.lock();
-                labels.retain(|l| !batch_created_labels.contains(l));
-            }
-            continue;
-        }
-
-        // =============================================================
-        // BATCH PHASE 4: Wait for AI responses (~45 seconds)
-        // =============================================================
-        {
-            let mut scan = state.scan.lock();
-            scan.phase = "waiting".to_string();
-            for platform_str in &selected_platforms {
-                if let Some(ps) = scan.platforms.get_mut(platform_str) {
-                    if ps.status != "skipped" {
-                        ps.status = "waiting".to_string();
-                    }
-                }
-            }
-        }
-        emit_progress_with_state(&app, &state);
-
-        eprintln!("[Scan] Batch {}: Waiting for AI responses...", batch_number);
-
-        const WAIT_SECONDS: usize = 45;
-        for remaining in (0..=WAIT_SECONDS).rev() {
-            let is_cancelled = {
-                let scan = state.scan.lock();
-                !scan.is_running
-            };
-
-            if is_cancelled {
-                let mut mgr = manager.lock().await;
-                for label in &batch_created_labels {
-                    mgr.close_webview(&app, label);
-                }
-                return Err("Scan cancelled".to_string());
-            }
-
-            emit_progress_with_countdown(&app, &state, remaining);
-            if remaining > 0 {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-        }
-
-        // =============================================================
-        // BATCH PHASE 5: Collect responses from this batch
-        // =============================================================
-        {
-            let mut scan = state.scan.lock();
-            scan.phase = "collecting".to_string();
-        }
-        emit_progress_with_state(&app, &state);
-
-        eprintln!("[Scan] Batch {}: Collecting responses...", batch_number);
-
-        // Spawn collection tasks for this batch only
-        let mut collection_handles = Vec::new();
-
-        for task in batch {
-            if !batch_submitted_labels.contains(&task.label) {
-                continue;
-            }
-
-            let app_clone = app.clone();
-            let state_clone = state.clone();
-            let manager_clone = manager.clone();
-            let task_clone = task.clone();
-            let brand_clone = brand.clone();
-            let brand_domain_clone = brand_domain.clone();
-            let domain_aliases_clone = domain_aliases.clone();
-            let competitors_clone = competitors.clone();
-
-            let handle = tokio::spawn(async move {
-                eprintln!("[Scan] Collecting from webview: {}", task_clone.label);
-
-                let collect_result = {
-                    let mgr = manager_clone.lock().await;
-                    mgr.collect_response(
-                        &app_clone,
-                        &task_clone.label,
-                        &task_clone.platform,
-                        &brand_clone,
-                        brand_domain_clone.as_deref(),
-                        domain_aliases_clone.as_deref(),
-                        &competitors_clone,
-                    ).await
-                };
-
-                // Close webview after collecting
-                {
-                    let mut mgr = manager_clone.lock().await;
-                    mgr.close_webview(&app_clone, &task_clone.label);
-                }
-                {
-                    let mut labels = state_clone.scan_webview_labels.lock();
-                    labels.retain(|l| l != &task_clone.label);
-                }
-
-                match collect_result {
-                    Ok(response) => ScanTaskResult {
-                        webview_label: task_clone.label,
-                        platform: task_clone.platform,
-                        country_code: task_clone.country_code,
-                        prompt: task_clone.prompt,
-                        response: Some(response),
-                        error: None,
-                    },
-                    Err(e) => ScanTaskResult {
-                        webview_label: task_clone.label,
-                        platform: task_clone.platform,
-                        country_code: task_clone.country_code,
-                        prompt: task_clone.prompt,
-                        response: None,
-                        error: Some(e),
-                    },
-                }
-            });
-
-            collection_handles.push(handle);
-        }
-
-        // Wait for batch collections to complete
-        let collection_results = futures::future::join_all(collection_handles).await;
-
-        // Process batch results and submit to API
-        for result in collection_results {
-            match result {
-                Ok(scan_result) => {
-                    if let Some(response) = scan_result.response {
-                        total_collected += 1;
-                        if response.brand_mentioned {
-                            total_mentioned += 1;
-                        }
-                        if response.citation_present {
-                            total_cited += 1;
-                        }
-
-                        // Update platform stats
-                        {
-                            let mut scan = state.scan.lock();
-                            if let Some(ps) = scan.platforms.get_mut(&scan_result.platform) {
-                                ps.collected += 1;
-                            }
-                            scan.completed_prompts += 1;
-                        }
-                        emit_progress_with_state(&app, &state);
-
-                        // Submit to API
-                        if let Some(ref token) = token {
-                            let api_result = ScanResult {
-                                product_id: product_id.clone(),
-                                scan_session_id: scan_session_id.clone(),
-                                platform: scan_result.platform.clone(),
-                                prompt_id: scan_result.prompt.id.clone(),
-                                prompt_text: scan_result.prompt.text.clone(),
-                                response_text: response.response_text,
-                                brand_mentioned: response.brand_mentioned,
-                                citation_present: response.citation_present,
-                                position: response.position,
-                                sentiment: response.sentiment.clone(),
-                                competitor_mentions: response.competitor_mentions,
-                                competitor_details: response.competitor_details.iter().map(|cd| {
-                                    crate::CompetitorDetailResult {
-                                        name: cd.name.clone(),
-                                        position: cd.position,
-                                        sentiment: cd.sentiment.clone(),
-                                    }
-                                }).collect(),
-                                citations: response.citations,
-                                credits_exhausted: response.credits_exhausted,
-                                chat_url: response.chat_url,
-                                request_country: Some(scan_result.country_code.clone()),
-                            };
-
-                            match client
-                                .post(format!("{}/functions/v1/extension-scan-results", crate::SUPABASE_URL))
-                                .header("Authorization", format!("Bearer {}", token))
-                                .header("apikey", crate::SUPABASE_ANON_KEY)
-                                .header("Content-Type", "application/json")
-                                .json(&api_result)
-                                .send()
-                                .await
-                            {
-                                Ok(resp) => {
-                                    if resp.status().is_success() {
-                                        eprintln!("[Scan] API submission successful for {}", scan_result.webview_label);
-                                    } else {
-                                        eprintln!("[Scan] API submission failed: {}", resp.status());
-                                    }
-                                }
-                                Err(e) => eprintln!("[Scan] API request error: {}", e),
-                            }
-                        }
-                    } else if let Some(error) = scan_result.error {
-                        eprintln!("[Scan] Collection failed for {}: {}", scan_result.webview_label, error);
-                        let mut scan = state.scan.lock();
-                        if let Some(ps) = scan.platforms.get_mut(&scan_result.platform) {
-                            ps.failed += 1;
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[Scan] Collection task panicked: {}", e);
-                }
-            }
-        }
-
-        eprintln!("[Scan] Batch {}: Complete. Collected {} responses so far", batch_number, total_collected);
     }
 
-    eprintln!("[Scan] All {} batches processed. Total collected: {} responses", num_batches, total_collected);
+    eprintln!("[Scan] All {} platforms complete. Total collected: {} responses", num_platforms, total_collected);
 
     // Mark all platforms as complete
     {
@@ -806,6 +859,7 @@ async fn run_scan(
     emit_progress_with_state(&app, &state);
 
     // ============== PHASE 5: Finalize ==============
+    let client = reqwest::Client::new();
     if let Some(token) = token {
         eprintln!("[Scan] Finalizing scan session {}...", scan_session_id);
 
@@ -834,10 +888,7 @@ async fn run_scan(
 
     // Final cleanup
     eprintln!("[Columbus] Scan complete - performing final webview cleanup");
-    {
-        let mut mgr = manager.lock().await;
-        mgr.close_all(&app);
-    }
+    manager.write().await.close_all(&app);
     eprintln!("[Columbus] Final webview cleanup complete");
 
     let mention_rate = if total_collected > 0 {

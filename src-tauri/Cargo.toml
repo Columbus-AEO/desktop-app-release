@@ -1,6 +1,6 @@
 [package]
 name = "columbus-desktop"
-version = "1.1.2"
+version = "1.1.3"
 description = "Columbus AI Brand Monitor Desktop App"
 authors = ["Columbus"]
 edition = "2021"

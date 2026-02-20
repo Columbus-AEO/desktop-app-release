@@ -864,7 +864,7 @@ impl WebviewManager {
     }
 }
 
-fn decode_base64_and_parse(data: &str) -> Result<CollectResponse, String> {
+pub fn decode_base64_and_parse(data: &str) -> Result<CollectResponse, String> {
     use std::str;
 
     // Decode base64
@@ -1019,7 +1019,7 @@ fn get_login_check_script(platform: &str) -> String {
     "#, platform, check_code, platform)
 }
 
-fn get_submit_script(platform: &str, prompt: &str) -> String {
+pub fn get_submit_script(platform: &str, prompt: &str) -> String {
     let escaped_prompt = prompt
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -1454,7 +1454,7 @@ fn get_submit_script(platform: &str, prompt: &str) -> String {
     }
 }
 
-fn get_collect_script(platform: &str, brand: &str, brand_domain: Option<&str>, domain_aliases: Option<&[String]>, competitors: &[String]) -> String {
+pub fn get_collect_script(platform: &str, brand: &str, brand_domain: Option<&str>, domain_aliases: Option<&[String]>, competitors: &[String]) -> String {
     let escaped_brand = brand.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_domain = brand_domain
         .map(|d| d.replace('\\', "\\\\").replace('"', "\\\""))

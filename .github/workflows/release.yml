@@ -77,6 +77,95 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev
 
+      # ── Detect signing configuration ─────────────────────────────────
+      - name: Check signing secrets
+        id: signing
+        shell: bash
+        run: |
+          if [ -n "$WINDOWS_SIGNING" ]; then echo "windows=true" >> $GITHUB_OUTPUT; fi
+          if [ -n "$MACOS_SIGNING" ]; then echo "macos=true" >> $GITHUB_OUTPUT; fi
+        env:
+          WINDOWS_SIGNING: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE }}
+
+      # ── Windows Code Signing Setup ──────────────────────────────────
+      - name: Setup Trusted Signing (Windows)
+        if: matrix.platform == 'windows-latest' && steps.signing.outputs.windows == 'true'
+        shell: pwsh
+        env:
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+        run: |
+          # Install the Trusted Signing dlib via NuGet
+          nuget install Microsoft.Trusted.Signing.Client -Version 1.0.60 -OutputDirectory "$env:RUNNER_TEMP\signing"
+          $dlibPath = Get-ChildItem "$env:RUNNER_TEMP\signing" -Recurse -Filter "Azure.CodeSigning.Dlib.dll" | Where-Object { $_.FullName -like "*x64*" } | Select-Object -First 1
+          Write-Host "Dlib found at: $($dlibPath.FullName)"
+
+          # Find signtool
+          $sdkDirs = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.0.*" -ErrorAction SilentlyContinue | Sort-Object Name
+          $signtoolPath = "$($sdkDirs[-1].FullName)\x64\signtool.exe"
+          Write-Host "Signtool found at: $signtoolPath"
+
+          # Create metadata.json
+          $metadata = @{
+            Endpoint = $env:TRUSTED_SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:TRUSTED_SIGNING_ACCOUNT
+            CertificateProfileName = $env:TRUSTED_SIGNING_PROFILE
+          } | ConvertTo-Json
+          $metadataPath = "$env:RUNNER_TEMP\signing\metadata.json"
+          $metadata | Set-Content $metadataPath
+          Write-Host "Metadata: $metadata"
+
+          # Save paths for the configure step
+          echo "SIGNTOOL_PATH=$signtoolPath" >> $env:GITHUB_ENV
+          echo "DLIB_PATH=$($dlibPath.FullName)" >> $env:GITHUB_ENV
+          echo "METADATA_PATH=$metadataPath" >> $env:GITHUB_ENV
+
+      - name: Configure Windows code signing
+        if: matrix.platform == 'windows-latest' && steps.signing.outputs.windows == 'true'
+        shell: pwsh
+        run: |
+          $configPath = "src-tauri/tauri.conf.json"
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          # Use signtool directly with Trusted Signing dlib
+          $signCmd = @{
+            cmd = $env:SIGNTOOL_PATH
+            args = @(
+              "sign", "/v", "/fd", "SHA256",
+              "/tr", "http://timestamp.acs.microsoft.com",
+              "/td", "SHA256",
+              "/dlib", $env:DLIB_PATH,
+              "/dmdf", $env:METADATA_PATH,
+              "%1"
+            )
+          }
+          if ($config.bundle.windows.PSObject.Properties['signCommand']) {
+            $config.bundle.windows.signCommand = $signCmd
+          } else {
+            $config.bundle.windows | Add-Member -NotePropertyName "signCommand" -NotePropertyValue $signCmd
+          }
+          $config.bundle.windows.certificateThumbprint = $null
+          $config | ConvertTo-Json -Depth 10 | Set-Content $configPath
+          Write-Host "Configured signtool with Trusted Signing dlib"
+
+      # ── macOS Code Signing Setup ────────────────────────────────────
+      - name: Import Apple certificate
+        if: startsWith(matrix.platform, 'macos') && steps.signing.outputs.macos == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm certificate.p12
+
+      # ── Build ───────────────────────────────────────────────────────
       - name: Install frontend dependencies
         run: npm ci
 
@@ -86,7 +175,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Azure Trusted Signing credentials (picked up by trusted-signing-cli)
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          # macOS notarization credentials
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
           includeUpdaterJson: true
+
+      # ── Cleanup ─────────────────────────────────────────────────────
+      - name: Cleanup macOS keychain
+        if: startsWith(matrix.platform, 'macos') && steps.signing.outputs.macos == 'true' && always()
+        run: security delete-keychain build.keychain
